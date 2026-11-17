@@ -615,9 +615,11 @@ class ActionRunner:
         shots_fired = 0
         no_enemy_ticks = 0
         aligned_without_lock_ticks = 0
+        consecutive_steer_ticks = 0
+        last_steer_bearing: Optional[float] = None
 
         def _on_tick(state: FrameState) -> Optional[str]:
-            nonlocal sweep_idx, shots_fired, no_enemy_ticks, aligned_without_lock_ticks
+            nonlocal sweep_idx, shots_fired, no_enemy_ticks, aligned_without_lock_ticks, consecutive_steer_ticks, last_steer_bearing
             if state.tick == 0 and aim_settle_s > 0:
                 self._sleep(aim_settle_s)
                 return None
@@ -626,6 +628,7 @@ class ActionRunner:
             if reticle.is_red:
                 no_enemy_ticks = 0
                 aligned_without_lock_ticks = 0
+                consecutive_steer_ticks = 0
                 if fire_on_lock:
                     self._fire_bursts(fire_button, bursts=bursts, hold_s=0.03, gap_s=0.03)
                     shots_fired += 1
@@ -638,13 +641,26 @@ class ActionRunner:
             enemy = state.minimap.nearest_enemy
             if enemy is not None and abs(enemy.bearing) > bearing_deadband:
                 no_enemy_ticks = 0
-                aligned_without_lock_ticks = 0
-                dx = int(round(max(-220.0, min(220.0, enemy.bearing * steer_gain))))
-                if dx != 0:
-                    self._steer_camera(dx, 0, release_aim_button=aim_button)
-                    if abs(dx) >= 30:
-                        sweep_idx = 0
-                return None
+                if last_steer_bearing is not None and abs(enemy.bearing - last_steer_bearing) < 0.03:
+                    consecutive_steer_ticks += 1
+                else:
+                    consecutive_steer_ticks = 1
+                last_steer_bearing = enemy.bearing
+
+                if consecutive_steer_ticks >= 10:
+                    return "steer_stalled"
+
+                if consecutive_steer_ticks < 4 or abs(enemy.bearing) > 0.35:
+                    aligned_without_lock_ticks = 0
+                    dx = int(round(max(-220.0, min(220.0, enemy.bearing * steer_gain))))
+                    if dx != 0:
+                        self._steer_camera(dx, 0, release_aim_button=aim_button)
+                        if abs(dx) >= 30:
+                            sweep_idx = 0
+                    return None
+            else:
+                consecutive_steer_ticks = 0
+                last_steer_bearing = None
 
             if enemy is None:
                 no_enemy_ticks += 1

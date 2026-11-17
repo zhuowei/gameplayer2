@@ -168,3 +168,23 @@ def test_minimap_cli_inspect_frame(tmp_path, capsys) -> None:
     payload = json.loads(capsys.readouterr().out)
     assert payload["minimap_visible"] is True
     assert payload["primary_objective"]["kind"] == "yellow"
+
+
+def test_minimap_rejects_magenta_police_siren_flash_and_detects_true_enemy(tmp_path) -> None:
+    from PIL import ImageDraw
+
+    frame = make_synthetic_minimap_frame(health_ratio=1.0, red_points=[(0.50, 0.40)])
+    # Paint a magenta-red siren flash (191, 51, 71) near bottom of radar (observed in 5-star chase)
+    w, h = frame.size
+    rx0 = int(round(MINIMAP_RADAR_BOX[0] * w))
+    ry0 = int(round(MINIMAP_RADAR_BOX[1] * h))
+    rw = int(round((MINIMAP_RADAR_BOX[2] - MINIMAP_RADAR_BOX[0]) * w))
+    rh = int(round((MINIMAP_RADAR_BOX[3] - MINIMAP_RADAR_BOX[1]) * h))
+    draw = ImageDraw.Draw(frame)
+    sx, sy = rx0 + int(0.48 * rw), ry0 + int(0.92 * rh)
+    draw.rectangle((sx - 2, sy - 2, sx + 2, sy + 2), fill=(191, 51, 71))
+
+    obs = inspect_minimap(frame, logger=TelemetryLogger(tmp_path / "t.jsonl"))
+    assert len(obs.targets["red"]) == 1
+    assert obs.nearest_enemy is not None
+    assert abs(obs.nearest_enemy.bearing) < 0.05
