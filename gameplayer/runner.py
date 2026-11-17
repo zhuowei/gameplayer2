@@ -187,6 +187,7 @@ class ActionRunner:
         initial_keys: Iterable[str] = (),
         initial_buttons: Iterable[str] = (),
         on_health_drop: Optional[Callable[[], None]] = None,
+        on_before_release: Optional[Callable[[], None]] = None,
     ) -> LoopResult:
         if config.hz <= 0:
             raise ValueError(f"config.hz must be positive, got {config.hz}")
@@ -324,6 +325,11 @@ class ActionRunner:
                     if sleep_s > 0:
                         self._sleep(sleep_s)
             finally:
+                if on_before_release is not None:
+                    try:
+                        on_before_release()
+                    except Exception:
+                        pass
                 self.input.release_all(reason=f"runner:{stop_reason}", suppress_errors=True)
                 if stop_reason == "health_drop" and on_health_drop is not None:
                     on_health_drop()
@@ -1093,14 +1099,12 @@ class ActionRunner:
                     self._steer_camera(dx, 0)
             return None
 
-        try:
-            result = self._run_loop(
-                mode_name="advance_under_fire",
-                config=cfg,
-                on_tick=_on_tick,
-            )
-        finally:
-            _recenter_sweep()
+        result = self._run_loop(
+            mode_name="advance_under_fire",
+            config=cfg,
+            on_tick=_on_tick,
+            on_before_release=_recenter_sweep,
+        )
         if cover_on_timeout and result.stop_reason == "timeout" and phase != "recover":
             self._tap_key_preserving_held("q", hold_s=0.08)
             self._logger.log(
@@ -1888,11 +1892,9 @@ class ActionRunner:
                     sweep_offset_y += dy
             return None
 
-        try:
-            return self._run_loop(
-                mode_name="cover_peek_combat",
-                config=cfg,
-                on_tick=_on_tick,
-            )
-        finally:
-            _recenter_sweep()
+        return self._run_loop(
+            mode_name="cover_peek_combat",
+            config=cfg,
+            on_tick=_on_tick,
+            on_before_release=_recenter_sweep,
+        )

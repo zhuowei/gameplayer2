@@ -1277,8 +1277,11 @@ def test_recenter_sweep_on_timeout_prevents_sky_pitch_drift(tmp_path) -> None:
                 config=LoopConfig(max_duration_s=0.25, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
             )
         assert res.stop_reason == "timeout"
-        assert sum(ev[1][0] for ev in backend.events if ev[0] == "mouse_delta") == 0
-        assert sum(ev[1][1] for ev in backend.events if ev[0] == "mouse_delta") == 0
+        deltas = [ev[1] for ev in backend.events if ev[0] == "mouse_delta"]
+        assert sum(d[0] for d in deltas) == 0
+        assert sum(d[1] for d in deltas) == 0
+        # Recenter must run via on_before_release while "right" ADS is still held (never in hipfire after mouse_up).
+        assert all("right" in d[2] for d in deltas)
         assert backend.currently_held_keys == set()
         assert backend.currently_held_buttons == set()
 
