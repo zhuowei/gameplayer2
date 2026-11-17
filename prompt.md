@@ -1,21 +1,22 @@
-Please control the running Grand Theft Auto 5 window on macOS and play through the game until you reach the end credits (or until I stop you).
+Use a swarm to control the running Grand Theft Auto 5 window on macOS (Game Porting Toolkit) and play legitimately through Story Mode until you reach the end credits (or until I stop you).
 
-Setup & Persistence (Do This First):
-- Initialize (or use) the local git repo with a `.gitignore` excluding videos, screenshots, and large model/cache files.
-- Write our core operating rules (black-box boundary, input safety, stall thresholds, and continuous self-improvement) into `AGENTS.md` at the repo root so they persist across context compactions, and maintain clear skill/`TOOLS.md` docs for subagents.
-- Maintain a structured `STATUS.md` scoreboard tracking: current mission/objective, consecutive failures, minutes on current checkpoint, minutes since last commit, and a `Problem -> Code/Skill Change -> Verified Outcome` table.
+Roles & Bootstrap (Avoid File/Window Collisions):
+- Coordinator delegates all file/command work to workers (`toolsmith`, `verifier`, `player`, `watcher`, plus Swarm's `monitor`). Use Swarm channels if available to separate `#dev` and `#monitoring` chatter from `player`, and never use `@all` unless necessary (wake only the worker that acts next, referencing `#seq` numbers).
+- Bootstrap first: before starting `player`, have `toolsmith` initialize git + `.gitignore` (excluding videos, screenshots, and large model/cache files), create `AGENTS.md` (with these rules so they survive context compactions), `TOOLS.md`, `STATUS.md`, and a baseline window-capture + fail-safe input toolkit.
+- Strict ownership: ONLY `player` may focus or send inputs to the live game window (`player` uses tools and never edits code). `toolsmith` builds in an isolated `workspace: "share"` copy and merges into the live workspace only after `verifier` passes offline tests.
 
-Boundaries & Requirements:
-- Treat the game strictly as a black box: interact only via window/screen capture and synthetic OS inputs (do not read or modify game files, Wine state, or process memory).
-- Play legitimately from start to finish: do not skip missions or parts/checkpoints of missions, and do not use cheats or external saves.
-- Ensure all input tools automatically release held keys/buttons on exit, error, or timeout so inputs never stick at the OS level.
+Boundaries & Gameplay Rules:
+- Black box only: interact strictly via clean, unobstructed `16:9` window capture and synthetic OS inputs (never read/modify game files, Wine state, or process memory). If operating visually without audio, enable in-game subtitles in settings early on.
+- Legitimate play: do not skip missions or mission checkpoints/sections, and do not use cheats, mods, or external save files (normal in-game saves/autosaves and restarting/refocusing the window on crash/focus-loss are fine).
+- Input safety: every input tool must automatically release all held keys/buttons on exit, error, or timeout.
+- Pause policy: play primarily in continuous real time via closed-loop tools rather than pause-stepping moves, but allow pausing strategically when waiting on tool engineering or diagnosing a novel hazard.
 
-Subagent & Monitoring:
-- Use a gameplay subagent (with command execution enabled) to play using fast local tools and single screenshots—keep video recording out of the gameplay subagent's loop, and rotate in a fresh gameplay subagent if its context grows too long.
-- Schedule a recurring 3-minute check whose wakeup prompt explicitly includes both monitoring AND the self-improvement check below. Capture downscaled window video for each 3-minute period, delegate full-clip + telemetry triage to a fresh subagent per check (so raw video doesn't fill your main context), and inspect short 10–15s trimmed clips yourself when debugging failures.
-- Have the gameplay subagent notify you immediately on death/fail, mission milestones, >2 stuck turns, or unresponsive inputs/camera.
+Models, Monitoring & Quota Efficiency:
+- Conserve quota via model tiering: default workers (`player`, `watcher`, `verifier`, routine `toolsmith`, and child subagents) to `Gemini 4 Hydrogen (Medium)` (or `Hydrogen (High)` for harder coding), and escalate to `Gemini 4 Carbon (Medium)` strictly for tough architectural, perception, or root-cause problems that fail on Hydrogen—switching back to `Hydrogen (Medium)` (or killing a one-shot specialist) once solved, and switching models if quota runs low. Rotate `player` or `watcher` cleanly if their context grows long.
+- `watcher` runs a rolling downscaled window-video capture daemon and a recurring 3-minute `schedule` (restarting either if stopped, with the self-improvement check embedded directly in the wakeup prompt). On each check, `watcher` delegates reading the raw 3-minute clip + tool telemetry to a fresh disposable `invoke_subagent` (keeping raw video out of Swarm contexts; extract short 10–15s slices only when debugging specific failures), updates the `STATUS.md` scoreboard (current objective, consecutive failures, minutes on checkpoint, LLM turns per checkpoint, minutes since last commit, and `Problem -> Code & Skill Change -> Verified Outcome`), and alerts `@coordinator` / `@toolsmith` on stalls or friction.
+- `player` posts immediately on death/fail, mission milestones, >2 stuck turns, or unresponsive inputs/camera. Maximize progress per LLM turn by pushing per-frame perception and control into fast local loops.
 
-Continuous Self-Improvement:
-- Actively improve BOTH your runtime/tools (closed-loop code for fast perception, aiming, combat, driving, navigation, UI/prompt reading, and surviving LLM thinking gaps so the subagent specifies high-level targets/goals rather than raw input timings) AND your skills/subagent instructions/docs (tactical heuristics, tool-usage rules, and failure lessons)—never relying on prompt advice alone when code should handle it.
-- Use established third-party libraries, native macOS frameworks, or local pretrained models where appropriate rather than reinventing brittle pixel heuristics from scratch.
-- Build and unit-test improvements in parallel while the subagent plays, targeting both failures and slow/repetitive manual actions. Whenever `consecutive_failures >= 2`, a checkpoint stalls for >= 6 minutes, or > 10 minutes pass with unaddressed manual friction, ship and test an upgrade, update the running tools and subagent, `git commit`, and `git push` to origin.
+Continuous Self-Improvement & Offline Verification:
+- Continuously improve BOTH closed-loop runtime tools (high-level goal/target APIs for movement, aiming/combat, driving, navigation, OCR/UI reading, and turn-gap survival, using established third-party libraries, native macOS APIs, or local pretrained models where appropriate) AND persistent skills/docs (`AGENTS.md`, `TOOLS.md`) capturing tactical heuristics and failure lessons.
+- Scope incrementally, verify thoroughly offline: ship focused upgrades frequently in parallel while `player` plays, gating every change (`verifier`) with unit tests, saved failure screenshots/clips as regression fixtures, and lightweight offline replay/control-mock harnesses so you compare and tune strategies rapidly without using slow game reloads as your debugger.
+- Mandatory trigger: whenever `consecutive_failures >= 2`, a checkpoint stalls >= 6 minutes, or manual turn friction remains high, land a verified upgrade into the live workspace, `git commit` (and `git push` if a remote is configured), and notify `@player`.
