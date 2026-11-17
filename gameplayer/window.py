@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
+import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Protocol, Sequence
+from typing import Any, Optional, Protocol, Sequence
 
 import numpy as np
 from PIL import Image
@@ -25,7 +28,7 @@ class WindowNotFoundError(RuntimeError):
 
 
 class WindowCaptureError(RuntimeError):
-    """Raised when capturing pixels from a window fails."""
+    """Raised when capturing or focusing a window fails."""
 
 
 @dataclass(frozen=True)
@@ -39,6 +42,14 @@ class WindowBounds:
     def area(self) -> float:
         return max(0.0, self.width) * max(0.0, self.height)
 
+    def intersects(self, other: "WindowBounds") -> bool:
+        return (
+            self.x < (other.x + other.width)
+            and (self.x + self.width) > other.x
+            and self.y < (other.y + other.height)
+            and (self.y + self.height) > other.y
+        )
+
 
 @dataclass(frozen=True)
 class WindowInfo:
@@ -50,6 +61,7 @@ class WindowInfo:
     layer: int = 0
     is_onscreen: bool = True
     is_frontmost: bool = False
+    obstructed_by: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -66,6 +78,7 @@ class WindowInfo:
             "layer": self.layer,
             "is_onscreen": self.is_onscreen,
             "is_frontmost": self.is_frontmost,
+            "obstructed_by": list(self.obstructed_by),
         }
 
 
@@ -145,17 +158,30 @@ def normalize_to_16_9(
     return image.crop(box), True
 
 
+class _CarbonPSN(ctypes.Structure):
+    _fields_ = [("highLongOfPSN", ctypes.c_uint32), ("lowLongOfPSN", ctypes.c_uint32)]
+
+
 class QuartzWindowBackend:
-    """macOS CoreGraphics/AppKit black-box window discovery & capture backend."""
+    """macOS CoreGraphics/AppKit/Accessibility black-box window discovery & capture backend."""
 
     def __init__(self) -> None:
         import AppKit  # noqa: F401
+        import ApplicationServices  # noqa: F401
+        import Foundation  # noqa: F401
         import Quartz  # noqa: F401
 
         self._appkit = AppKit
+        self._appserv = ApplicationServices
+        self._foundation = Foundation
         self._quartz = Quartz
 
+    def _pump_runloop(self, seconds: float = 0.05) -> None:
+        until = self._foundation.NSDate.dateWithTimeIntervalSinceNow_(seconds)
+        self._foundation.NSRunLoop.currentRunLoop().runUntilDate_(until)
+
     def _frontmost_pid(self) -> Optional[int]:
+        self._pump_runloop(0.01)
         app = self._appkit.NSWorkspace.sharedWorkspace().frontmostApplication()
         if app is None:
             return None
@@ -166,7 +192,8 @@ class QuartzWindowBackend:
         opts = q.kCGWindowListOptionOnScreenOnly | q.kCGWindowListExcludeDesktopElements
         raw_list = q.CGWindowListCopyWindowInfo(opts, q.kCGNullWindowID) or []
         front_pid = self._frontmost_pid()
-        results: list[WindowInfo] = []
+
+        parsed: list[tuple[int, str, str, int, WindowBounds, int, bool]] = []
         for entry in raw_list:
             b = entry.get("kCGWindowBounds") or {}
             bounds = WindowBounds(
@@ -175,17 +202,38 @@ class QuartzWindowBackend:
                 width=float(b.get("Width", 0.0)),
                 height=float(b.get("Height", 0.0)),
             )
-            pid = int(entry.get("kCGWindowOwnerPID", 0))
+            parsed.append(
+                (
+                    int(entry.get("kCGWindowNumber", 0)),
+                    str(entry.get("kCGWindowOwnerName", "") or ""),
+                    str(entry.get("kCGWindowName", "") or ""),
+                    int(entry.get("kCGWindowOwnerPID", 0)),
+                    bounds,
+                    int(entry.get("kCGWindowLayer", 0)),
+                    bool(entry.get("kCGWindowIsOnscreen", True)),
+                )
+            )
+
+        results: list[WindowInfo] = []
+        for idx, (wid, owner, title, pid, bounds, layer, onscreen) in enumerate(parsed):
+            obstructors: list[str] = []
+            if layer == 0 and onscreen and bounds.area > 0:
+                for prev_wid, prev_owner, _, prev_pid, prev_bounds, prev_layer, prev_on in parsed[:idx]:
+                    if prev_layer == 0 and prev_on and prev_pid != pid and prev_bounds.intersects(bounds):
+                        label = f"{prev_owner}(pid={prev_pid},wid={prev_wid})"
+                        if label not in obstructors:
+                            obstructors.append(label)
             results.append(
                 WindowInfo(
-                    window_id=int(entry.get("kCGWindowNumber", 0)),
-                    owner=str(entry.get("kCGWindowOwnerName", "") or ""),
-                    title=str(entry.get("kCGWindowName", "") or ""),
+                    window_id=wid,
+                    owner=owner,
+                    title=title,
                     pid=pid,
                     bounds=bounds,
-                    layer=int(entry.get("kCGWindowLayer", 0)),
-                    is_onscreen=bool(entry.get("kCGWindowIsOnscreen", True)),
+                    layer=layer,
+                    is_onscreen=onscreen,
                     is_frontmost=(front_pid is not None and pid == front_pid),
+                    obstructed_by=tuple(obstructors),
                 )
             )
         return results
@@ -233,13 +281,84 @@ class QuartzWindowBackend:
         rgba = Image.frombytes("RGBA", (width, height), raw_data, "raw", raw_mode, bytes_per_row, 1)
         return rgba.convert("RGB")
 
-    def focus_window(self, window: WindowInfo) -> bool:
-        """Activate the owning application (ONLY `player` may invoke this)."""
-        app = self._appkit.NSRunningApplication.runningApplicationWithProcessIdentifier_(int(window.pid))
+    def _is_window_active_and_unobstructed(self, window: WindowInfo) -> bool:
+        for w in self.list_windows():
+            if w.window_id == window.window_id:
+                return w.is_frontmost and not w.obstructed_by
+        return False
+
+    def _activate_via_ax(self, window: WindowInfo) -> None:
+        ax = self._appserv
+        ax_app = ax.AXUIElementCreateApplication(int(window.pid))
+        err, ax_wins = ax.AXUIElementCopyAttributeValue(ax_app, "AXWindows", None)
+        if err == 0 and ax_wins:
+            target_ax_win = ax_wins[0]
+            for cand in ax_wins:
+                _, t = ax.AXUIElementCopyAttributeValue(cand, "AXTitle", None)
+                if t and str(t) == window.title:
+                    target_ax_win = cand
+                    break
+            ax.AXUIElementSetAttributeValue(target_ax_win, "AXMain", True)
+            ax.AXUIElementSetAttributeValue(target_ax_win, "AXFocused", True)
+            ax.AXUIElementPerformAction(target_ax_win, "AXRaise")
+        ax.AXUIElementSetAttributeValue(ax_app, "AXFrontmost", True)
+
+    def _activate_via_carbon(self, pid: int) -> None:
+        his = ctypes.cdll.LoadLibrary(
+            "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
+        )
+        psn = _CarbonPSN()
+        if his.GetProcessForPID(int(pid), ctypes.byref(psn)) == 0:
+            his.SetFrontProcess(ctypes.byref(psn))
+
+    def _activate_via_system_events(self, pid: int) -> None:
+        script = (
+            f'tell application "System Events" to set frontmost of '
+            f'first process whose unix id is {int(pid)} to true'
+        )
+        subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=3.0)
+
+    def focus_window(self, window: WindowInfo, timeout_s: float = 1.5) -> bool:
+        """Activate and raise the target window, verifying frontmost & unobstructed state.
+
+        STRICT OWNERSHIP: ONLY `player` may invoke this on the live game window.
+        """
+        pid = int(window.pid)
+        app = self._appkit.NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
         if app is None:
             return False
-        # NSApplicationActivateIgnoringOtherApps (1 << 1) ensures foreground focus for Wine/GPTK.
-        return bool(app.activateWithOptions_(1 << 1))
+
+        # 1. Accessibility raise + frontmost (works well for Wine/unbundled apps when trusted)
+        try:
+            self._activate_via_ax(window)
+        except Exception:
+            pass
+
+        # 2. Carbon SetFrontProcess + Cocoa activation
+        try:
+            self._activate_via_carbon(pid)
+        except Exception:
+            pass
+        app.activateWithOptions_(1 << 1)
+
+        deadline = time.monotonic() + max(0.2, float(timeout_s))
+        tried_system_events = False
+        while time.monotonic() < deadline:
+            self._pump_runloop(0.08)
+            if self._is_window_active_and_unobstructed(window):
+                return True
+            if not tried_system_events:
+                tried_system_events = True
+                try:
+                    self._activate_via_system_events(pid)
+                except Exception:
+                    pass
+                try:
+                    self._activate_via_ax(window)
+                except Exception:
+                    pass
+
+        return self._is_window_active_and_unobstructed(window)
 
 
 def _score_candidate(
@@ -360,7 +479,7 @@ def focus_game_window(
     owner_patterns: Sequence[str] = DEFAULT_OWNER_PATTERNS,
     title_patterns: Sequence[str] = DEFAULT_TITLE_PATTERNS,
 ) -> WindowInfo:
-    """Focus the game window. STRICT OWNERSHIP: ONLY `player` may call this with allow_focus=True."""
+    """Focus the game window and verify it is frontmost. ONLY `player` may call with allow_focus=True."""
     if not allow_focus:
         raise PermissionError(
             "Focusing the live game window requires allow_focus=True and is restricted exclusively to `player`."
@@ -374,10 +493,26 @@ def focus_game_window(
             title_patterns=title_patterns,
         )
         ok = active_backend.focus_window(win)
-        details.update({"window_id": win.window_id, "pid": win.pid, "activated": ok})
+        refreshed = find_game_window(
+            backend=active_backend,
+            owner_patterns=owner_patterns,
+            title_patterns=title_patterns,
+        )
+        details.update(
+            {
+                "window_id": refreshed.window_id,
+                "pid": refreshed.pid,
+                "activated": ok,
+                "is_frontmost": refreshed.is_frontmost,
+                "obstructed_by": list(refreshed.obstructed_by),
+            }
+        )
         if not ok:
-            raise WindowCaptureError(f"Failed to activate window_id={win.window_id} (pid={win.pid})")
-        return win
+            raise WindowCaptureError(
+                f"Failed to bring window_id={refreshed.window_id} (pid={refreshed.pid}) to front "
+                f"(is_frontmost={refreshed.is_frontmost}, obstructed_by={list(refreshed.obstructed_by)})"
+            )
+        return refreshed
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -412,6 +547,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     "aspect_ratio": res.aspect_ratio,
                     "window_id": res.window.window_id,
                     "is_frontmost": res.window.is_frontmost,
+                    "obstructed_by": list(res.window.obstructed_by),
                 },
                 indent=2,
             )

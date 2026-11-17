@@ -197,9 +197,27 @@ class CGEventInputBackend:
 
         self._quartz = Quartz
         self._target_pid = target_pid
+        self._source = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
+        self._active_modifiers: set[str] = set()
+        self._mod_flags = {
+            "lshift": Quartz.kCGEventFlagMaskShift,
+            "rshift": Quartz.kCGEventFlagMaskShift,
+            "lctrl": Quartz.kCGEventFlagMaskControl,
+            "rctrl": Quartz.kCGEventFlagMaskControl,
+            "lalt": Quartz.kCGEventFlagMaskAlternate,
+            "ralt": Quartz.kCGEventFlagMaskAlternate,
+            "lcmd": Quartz.kCGEventFlagMaskCommand,
+        }
+
+    def _modifier_flags(self) -> int:
+        flags = 0
+        for mod in self._active_modifiers:
+            flags |= self._mod_flags.get(mod, 0)
+        return flags
 
     def _post(self, event: Any) -> None:
         q = self._quartz
+        q.CGEventSetFlags(event, self._modifier_flags())
         if self._target_pid is not None:
             q.CGEventPostToPid(int(self._target_pid), event)
         else:
@@ -207,19 +225,22 @@ class CGEventInputBackend:
 
     def _cursor_pos(self) -> Any:
         q = self._quartz
-        probe = q.CGEventCreate(None)
+        probe = q.CGEventCreate(self._source)
         return q.CGEventGetLocation(probe)
 
     def key_down(self, key: str) -> None:
         norm = normalize_key_name(key)
+        if norm in self._mod_flags:
+            self._active_modifiers.add(norm)
         q = self._quartz
-        ev = q.CGEventCreateKeyboardEvent(None, KEYCODES[norm], True)
+        ev = q.CGEventCreateKeyboardEvent(self._source, KEYCODES[norm], True)
         self._post(ev)
 
     def key_up(self, key: str) -> None:
         norm = normalize_key_name(key)
+        self._active_modifiers.discard(norm)
         q = self._quartz
-        ev = q.CGEventCreateKeyboardEvent(None, KEYCODES[norm], False)
+        ev = q.CGEventCreateKeyboardEvent(self._source, KEYCODES[norm], False)
         self._post(ev)
 
     def _mouse_event_type_and_btn(self, button: str, down: bool) -> tuple[int, int]:
@@ -234,14 +255,14 @@ class CGEventInputBackend:
         norm = normalize_button_name(button)
         q = self._quartz
         ev_type, cg_btn = self._mouse_event_type_and_btn(norm, down=True)
-        ev = q.CGEventCreateMouseEvent(None, ev_type, self._cursor_pos(), cg_btn)
+        ev = q.CGEventCreateMouseEvent(self._source, ev_type, self._cursor_pos(), cg_btn)
         self._post(ev)
 
     def mouse_up(self, button: str) -> None:
         norm = normalize_button_name(button)
         q = self._quartz
         ev_type, cg_btn = self._mouse_event_type_and_btn(norm, down=False)
-        ev = q.CGEventCreateMouseEvent(None, ev_type, self._cursor_pos(), cg_btn)
+        ev = q.CGEventCreateMouseEvent(self._source, ev_type, self._cursor_pos(), cg_btn)
         self._post(ev)
 
     def mouse_move_delta(
@@ -261,7 +282,7 @@ class CGEventInputBackend:
             ev_type, cg_btn = q.kCGEventOtherMouseDragged, q.kCGMouseButtonCenter
         else:
             ev_type, cg_btn = q.kCGEventMouseMoved, q.kCGMouseButtonLeft
-        ev = q.CGEventCreateMouseEvent(None, ev_type, new_pos, cg_btn)
+        ev = q.CGEventCreateMouseEvent(self._source, ev_type, new_pos, cg_btn)
         q.CGEventSetIntegerValueField(ev, q.kCGMouseEventDeltaX, int(dx))
         q.CGEventSetIntegerValueField(ev, q.kCGMouseEventDeltaY, int(dy))
         self._post(ev)

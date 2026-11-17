@@ -7,6 +7,7 @@ from PIL import Image
 from gameplayer.telemetry import TelemetryLogger, read_telemetry
 from gameplayer.window import (
     WindowBounds,
+    WindowCaptureError,
     WindowInfo,
     WindowNotFoundError,
     capture_game_window,
@@ -18,9 +19,10 @@ from gameplayer.window import (
 
 
 class MockWindowBackend:
-    def __init__(self, windows: list[WindowInfo], images: dict[int, Image.Image]) -> None:
+    def __init__(self, windows: list[WindowInfo], images: dict[int, Image.Image], focus_succeeds: bool = True) -> None:
         self._windows = windows
         self._images = images
+        self._focus_succeeds = focus_succeeds
         self.focused_windows: list[int] = []
 
     def list_windows(self) -> list[WindowInfo]:
@@ -31,6 +33,22 @@ class MockWindowBackend:
 
     def focus_window(self, window: WindowInfo) -> bool:
         self.focused_windows.append(window.window_id)
+        if not self._focus_succeeds:
+            return False
+        self._windows = [
+            WindowInfo(
+                window_id=w.window_id,
+                owner=w.owner,
+                title=w.title,
+                pid=w.pid,
+                bounds=w.bounds,
+                layer=w.layer,
+                is_onscreen=w.is_onscreen,
+                is_frontmost=(w.window_id == window.window_id),
+                obstructed_by=() if w.window_id == window.window_id else w.obstructed_by,
+            )
+            for w in self._windows
+        ]
         return True
 
 
@@ -120,8 +138,8 @@ def test_capture_game_window_downscale_numpy_and_telemetry(tmp_path) -> None:
     assert records[0]["details"]["size"] == [640, 360]
 
 
-def test_focus_game_window_requires_explicit_opt_in(tmp_path) -> None:
-    win = _make_win(156, "GTA5.exe", "Grand Theft Auto V")
+def test_focus_game_window_requires_explicit_opt_in_and_verifies(tmp_path) -> None:
+    win = _make_win(156, "GTA5.exe", "Grand Theft Auto V", frontmost=False)
     backend = MockWindowBackend([win], {})
     logger = TelemetryLogger(tmp_path / "telemetry.jsonl")
 
@@ -131,4 +149,19 @@ def test_focus_game_window_requires_explicit_opt_in(tmp_path) -> None:
 
     focused = focus_game_window(backend=backend, logger=logger, allow_focus=True)
     assert focused.window_id == 156
+    assert focused.is_frontmost is True
     assert backend.focused_windows == [156]
+
+    failing_backend = MockWindowBackend([win], {}, focus_succeeds=False)
+    with pytest.raises(WindowCaptureError):
+        focus_game_window(backend=failing_backend, logger=logger, allow_focus=True)
+
+
+def test_window_bounds_intersects_and_to_dict() -> None:
+    a = WindowBounds(0, 0, 1920, 971)
+    b = WindowBounds(320, 180, 1280, 720)
+    c = WindowBounds(1700, 0, 200, 200)
+    assert a.intersects(b) is True
+    assert b.intersects(c) is False
+    win = WindowInfo(156, "GTA5.exe", "Grand Theft Auto V", 1167, b, obstructed_by=("OBS Studio(pid=1074,wid=95)",))
+    assert win.to_dict()["obstructed_by"] == ["OBS Studio(pid=1074,wid=95)"]

@@ -38,6 +38,7 @@ Black-box window metadata discovery (`CGWindowListCopyWindowInfo`) and clean uno
   - `.to_numpy()` returns `(H, W, 3)` `uint8` RGB array; `.save(path)` writes PNG.
 - `focus_game_window(..., allow_focus=True) -> WindowInfo`:
   - **STRICT OWNERSHIP**: ONLY `player` may call `focus_game_window(..., allow_focus=True)`. Raises `PermissionError` if `allow_focus` is not explicitly `True`.
+  - Uses Accessibility (`AXRaise` + `AXFrontmost`), Carbon `SetFrontProcess`, `NSRunningApplication.activateWithOptions_`, and `System Events` fallback, then pumps `NSRunLoop` and verifies both `is_frontmost` and `obstructed_by == ()` (raising `WindowCaptureError` if blocked).
 
 ---
 
