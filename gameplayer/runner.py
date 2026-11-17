@@ -783,6 +783,8 @@ class ActionRunner:
         no_enemy_ticks = 0
         no_enemy_since_t: Optional[float] = None
         aligned_ticks = 0
+        consecutive_steer_ticks = 0
+        last_steer_bearing: Optional[float] = None
 
         def _set_peek(want_peek: bool, now_t: float) -> None:
             nonlocal is_peeking, peek_start_t
@@ -797,7 +799,7 @@ class ActionRunner:
                 is_peeking = False
 
         def _on_tick(state: FrameState) -> Optional[str]:
-            nonlocal special_triggered, duck_until_t, duck_logged, peak_health, sweep_idx, shots_fired, no_enemy_ticks, no_enemy_since_t, aligned_ticks
+            nonlocal special_triggered, duck_until_t, duck_logged, peak_health, sweep_idx, shots_fired, no_enemy_ticks, no_enemy_since_t, aligned_ticks, consecutive_steer_ticks, last_steer_bearing
             mm = state.minimap
             now_t = state.elapsed_s
 
@@ -805,11 +807,13 @@ class ActionRunner:
                 self._tap_key_preserving_held("capslock", hold_s=0.08)
                 special_triggered = True
 
-            # Check in-loop heal/duck trigger (low HP or rapid drop while peeking)
+            # Check in-loop heal/duck trigger (low HP or rapid drop when HP < 0.70 / low armor)
             if mm.minimap_visible:
                 if peak_health is None or mm.health_ratio > peak_health:
                     peak_health = mm.health_ratio
-                rapid_drop = (peak_health - mm.health_ratio) >= rapid_drop_duck_threshold
+                rapid_drop = (peak_health - mm.health_ratio) >= rapid_drop_duck_threshold and (
+                    mm.health_ratio < 0.70 or mm.armor_ratio <= 0.05
+                )
                 if mm.health_ratio < min_peek_health or rapid_drop:
                     _set_peek(False, now_t)
                     duck_until_t = max(duck_until_t, now_t + eff_heal_wait_s)
@@ -843,6 +847,7 @@ class ActionRunner:
                 no_enemy_ticks = 0
                 no_enemy_since_t = None
                 aligned_ticks = 0
+                consecutive_steer_ticks = 0
                 self._fire_bursts(fire_button, bursts=2, hold_s=0.03, gap_s=0.03)
                 shots_fired += 1
                 if max_shots is not None and shots_fired >= max_shots:
@@ -853,13 +858,33 @@ class ActionRunner:
             if enemy is not None and abs(enemy.bearing) > bearing_deadband:
                 no_enemy_ticks = 0
                 no_enemy_since_t = None
-                aligned_ticks = 0
-                dx = int(round(max(-220.0, min(220.0, enemy.bearing * steer_gain))))
-                if dx != 0:
-                    self.input.mouse_delta(dx, 0, steps=1, duration_s=0.0)
-                    if abs(dx) >= 30:
-                        sweep_idx = 0
-                return None
+                if last_steer_bearing is not None and abs(enemy.bearing - last_steer_bearing) < 0.03:
+                    consecutive_steer_ticks += 1
+                else:
+                    consecutive_steer_ticks = 1
+                last_steer_bearing = enemy.bearing
+
+                if consecutive_steer_ticks >= 8:
+                    self._logger.log(
+                        tool="runner",
+                        action="cover_clamped",
+                        status="ok",
+                        details={"bearing": round(enemy.bearing, 3)},
+                    )
+                    return "cover_clamped"
+
+                # If camera yaw appears clamped inside FOV, fall through to sweep/suppressive fire instead of spinning
+                if consecutive_steer_ticks < 4 or abs(enemy.bearing) > 0.35:
+                    aligned_ticks = 0
+                    dx = int(round(max(-220.0, min(220.0, enemy.bearing * steer_gain))))
+                    if dx != 0:
+                        self.input.mouse_delta(dx, 0, steps=1, duration_s=0.0)
+                        if abs(dx) >= 30:
+                            sweep_idx = 0
+                    return None
+            else:
+                consecutive_steer_ticks = 0
+                last_steer_bearing = None
 
             if enemy is None:
                 no_enemy_ticks += 1

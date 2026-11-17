@@ -242,6 +242,27 @@ class CGEventInputBackend:
         probe = q.CGEventCreate(self._source)
         return q.CGEventGetLocation(probe)
 
+    def _safe_base_pos(self, dx: int, dy: int) -> tuple[float, float]:
+        """Keep synthetic mouse cursor inside central display bounds so deltas never clamp at screen edges."""
+        q = self._quartz
+        pos = self._cursor_pos()
+        bounds = q.CGDisplayBounds(q.CGMainDisplayID())
+        cx = float(bounds.origin.x + bounds.size.width * 0.5)
+        cy = float(bounds.origin.y + bounds.size.height * 0.5)
+        margin_x = max(120.0, float(bounds.size.width) * 0.18)
+        margin_y = max(80.0, float(bounds.size.height) * 0.18)
+        nx = float(pos.x) + dx
+        ny = float(pos.y) + dy
+        if (
+            abs(nx - cx) > margin_x
+            or abs(ny - cy) > margin_y
+            or abs(float(pos.x) - cx) > margin_x
+            or abs(float(pos.y) - cy) > margin_y
+        ):
+            q.CGWarpMouseCursorPosition((cx, cy))
+            return (cx, cy)
+        return (float(pos.x), float(pos.y))
+
     def key_down(self, key: str) -> None:
         norm = normalize_key_name(key)
         if norm in self._mod_flags:
@@ -286,8 +307,8 @@ class CGEventInputBackend:
         held_buttons: frozenset[str] = frozenset(),
     ) -> None:
         q = self._quartz
-        pos = self._cursor_pos()
-        new_pos = (pos.x + dx, pos.y + dy)
+        bx, by = self._safe_base_pos(int(dx), int(dy))
+        new_pos = (bx + int(dx), by + int(dy))
         if "left" in held_buttons:
             ev_type, cg_btn = q.kCGEventLeftMouseDragged, q.kCGMouseButtonLeft
         elif "right" in held_buttons:

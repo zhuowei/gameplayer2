@@ -279,3 +279,70 @@ def test_switch_character_hotkey_wheel_and_cli(tmp_path, capsys) -> None:
     rc = input_cli_main(["--dry-run", "switch-character", "trevor", "--method", "wheel"])
     assert rc == 0
     assert "lalt" in capsys.readouterr().out
+
+
+def test_cgevent_backend_warps_cursor_back_to_center_when_offscreen(monkeypatch) -> None:
+    warped: list[tuple[float, float]] = []
+
+    class _Pt:
+        def __init__(self, x: float, y: float) -> None:
+            self.x = x
+            self.y = y
+
+    class _Rect:
+        def __init__(self) -> None:
+            self.origin = _Pt(0.0, 0.0)
+            self.size = type("Size", (), {"width": 1920.0, "height": 1080.0})()
+
+    class _FakeQuartz:
+        kCGEventSourceStateHIDSystemState = 0
+        kCGEventMouseMoved = 5
+        kCGEventRightMouseDragged = 7
+        kCGMouseButtonLeft = 0
+        kCGMouseButtonRight = 1
+        kCGMouseEventDeltaX = 1
+        kCGMouseEventDeltaY = 2
+        kCGHIDEventTap = 0
+        kCGEventFlagMaskShift = 1
+        kCGEventFlagMaskControl = 2
+        kCGEventFlagMaskAlternate = 4
+        kCGEventFlagMaskCommand = 8
+
+        def CGEventSourceCreate(self, state):
+            return object()
+
+        def CGEventCreate(self, src):
+            return object()
+
+        def CGEventGetLocation(self, ev):
+            return _Pt(22032.0, 540.0)
+
+        def CGDisplayBounds(self, did):
+            return _Rect()
+
+        def CGMainDisplayID(self):
+            return 0
+
+        def CGWarpMouseCursorPosition(self, pos):
+            warped.append(pos)
+
+        def CGEventCreateMouseEvent(self, src, ev_type, pos, btn):
+            return {"type": ev_type, "pos": pos, "btn": btn}
+
+        def CGEventSetIntegerValueField(self, ev, field, val):
+            ev[field] = val
+
+        def CGEventSetFlags(self, ev, flags):
+            ev["flags"] = flags
+
+        def CGEventPost(self, tap, ev):
+            self.last_posted = ev
+
+    fake_q = _FakeQuartz()
+    import sys
+    monkeypatch.setitem(sys.modules, "Quartz", fake_q)
+    backend = gp_input.CGEventInputBackend()
+    backend.mouse_move_delta(-67, 0, held_buttons=frozenset({"right"}))
+    assert warped == [(960.0, 540.0)]
+    assert fake_q.last_posted["pos"] == (893.0, 540.0)
+    assert fake_q.last_posted[fake_q.kCGMouseEventDeltaX] == -67

@@ -389,6 +389,26 @@ def test_cover_peek_combat_in_loop_heal_resumes_then_clears_without_toggling_q_w
     assert backend.currently_held_buttons == set()
 
 
+def test_cover_peek_combat_detects_clamped_yaw_and_stops_instead_of_spinning(tmp_path) -> None:
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    ctrl = InputController(backend=backend, logger=TelemetryLogger(tmp_path / "t.jsonl"), clock=clock, sleep_fn=clock.sleep, register_signals=False)
+
+    # Enemy permanently far left (-0.50 bearing) while cover clamps camera yaw
+    clamped_frame = make_synthetic_minimap_frame(health_ratio=0.90, red_points=[(0.10, 0.77)])
+    win_backend = ReplayWindowBackend(lambda idx: clamped_frame)
+    runner = ActionRunner(ctrl, win_backend, ScriptedHudOCR(lambda idx: {}), TelemetryLogger(tmp_path / "t.jsonl"), clock, clock.sleep)
+
+    res = runner.cover_peek_combat(
+        enter_cover=False,
+        use_special=False,
+        config=LoopConfig(max_duration_s=5.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert res.stop_reason == "cover_clamped"
+    assert res.ticks <= 10
+    assert backend.currently_held_buttons == set()
+
+
 def test_follow_gps_drive_stuck_recovery_and_moving_no_false_trigger(tmp_path) -> None:
     # 1) Stuck scenario: identical frames for > 1.5s triggers reverse ('s') + counter-steer
     clock = FakeClock()
