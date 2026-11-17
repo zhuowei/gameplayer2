@@ -76,3 +76,7 @@ This file captures the non-negotiable operational rules for playing Grand Theft 
 - **NEVER** use `@all` unless genuinely necessary for the whole swarm.
 - Wake only the next acting worker(s) by `@name`, referencing board sequence numbers (`#seq`).
 - Keep posts concise and actionable (results, blockers, exact paths/SHAs/commands). Do not post greetings or empty acknowledgements.
+
+## 9. Gameplay Heuristics (Learned Lessons)
+
+- **Escort / Crew Tether (Prologue yard/gate exit & multi-protagonist missions)**: Stay near blue ally blips (Michael & Brad) and do NOT sprint far down the road alone (`follow_route_on_foot` aborts on `"return to"` / `"wait for"` / `"stay with"` / `"follow"` warnings; use `follow_blue_ally()` to rejoin allies).

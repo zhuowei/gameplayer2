@@ -411,6 +411,46 @@ def test_cover_peek_combat_detects_clamped_yaw_and_stops_instead_of_spinning(tmp
     assert backend.currently_held_buttons == set()
 
 
+def test_follow_route_stops_on_crew_tether_subtitle_and_follow_blue_ally_rejoins(tmp_path) -> None:
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    ctrl = InputController(backend=backend, logger=TelemetryLogger(tmp_path / "t.jsonl"), clock=clock, sleep_fn=clock.sleep, register_signals=False)
+
+    win_backend = ReplayWindowBackend(lambda idx: make_synthetic_minimap_frame(yellow_points=[(0.50, 0.25)]))
+    ocr = ScriptedHudOCR(
+        lambda idx: {"bottom_subtitle": [OcrLine("Return to the crew.", 0.95, (0.2, 0.8, 0.6, 0.1))]} if idx >= 1 else {}
+    )
+    runner = ActionRunner(ctrl, win_backend, ocr, TelemetryLogger(tmp_path / "t.jsonl"), clock, clock.sleep)
+
+    res = runner.follow_route_on_foot(sprint=True, config=LoopConfig(max_duration_s=4.0, hz=10.0, hud_check_interval_s=0.0))
+    assert res.stop_reason == "subtitle_keyword:return to"
+    assert backend.currently_held_keys == set()
+
+    # Now rejoin blue ally even while "Return to the crew." subtitle is on screen
+    clock2 = FakeClock()
+    backend2 = RecordingInputBackend()
+    ctrl2 = InputController(backend=backend2, logger=TelemetryLogger(tmp_path / "t2.jsonl"), clock=clock2, sleep_fn=clock2.sleep, register_signals=False)
+    blue_frames = [
+        make_synthetic_minimap_frame(blue_points=[(0.75, 0.45)]),
+        make_synthetic_minimap_frame(blue_points=[(0.50, 0.70)]),  # arrived within 0.14
+    ]
+    ocr2 = ScriptedHudOCR(
+        lambda idx: {"bottom_subtitle": [OcrLine("Return to the crew.", 0.95, (0.2, 0.8, 0.6, 0.1))]}
+    )
+    runner2 = ActionRunner(
+        ctrl2,
+        ReplayWindowBackend(lambda idx: blue_frames[min(idx, len(blue_frames) - 1)]),
+        ocr2,
+        TelemetryLogger(tmp_path / "t2.jsonl"),
+        clock2,
+        clock2.sleep,
+    )
+    res2 = runner2.follow_blue_ally(config=LoopConfig(max_duration_s=3.0, hz=10.0, hud_check_interval_s=0.0))
+    assert res2.stop_reason == "target_reached"
+    assert backend2.currently_held_keys == set()
+    assert any(ev[0] == "mouse_delta" and ev[1][0] > 0 for ev in backend2.events)
+
+
 def test_follow_gps_drive_stuck_recovery_and_moving_no_false_trigger(tmp_path) -> None:
     # 1) Stuck scenario: identical frames for > 1.5s triggers reverse ('s') + counter-steer
     clock = FakeClock()

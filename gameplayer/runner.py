@@ -337,16 +337,30 @@ class ActionRunner:
         arrive_distance: float = 0.08,
         steer_gain: float = 160.0,
         deadband: float = 0.05,
+        stop_on_subtitle_keywords: Sequence[str] = ("return to", "wait for", "stay with", "follow"),
         config: Optional[LoopConfig] = None,
     ) -> LoopResult:
-        """Walk/sprint toward minimap route/objective using proportional mouse camera steering."""
+        """Walk/sprint toward minimap route/objective with crew-tether subtitle keyword stop."""
         cfg = config or LoopConfig(max_duration_s=10.0, hz=10.0)
         keys = ("w", "lshift") if sprint else ("w",)
+        norm_keywords = tuple(kw.strip().lower() for kw in stop_on_subtitle_keywords if kw.strip())
 
         def _on_tick(state: FrameState) -> Optional[str]:
+            if state.hud is not None and norm_keywords:
+                combined_hud = f"{state.hud.subtitle_or_objective} {state.hud.help_prompt}".lower()
+                for kw in norm_keywords:
+                    if kw in combined_hud:
+                        return f"subtitle_keyword:{kw}"
+
             mm = state.minimap
             targets = mm.targets.get(target_color, ())
-            target = targets[0] if targets else mm.primary_objective
+            if targets:
+                target = targets[0]
+            elif target_color in ("yellow", "purple"):
+                target = mm.primary_objective
+            else:
+                target = None
+
             if target is not None and target.distance <= arrive_distance:
                 return "target_reached"
 
@@ -361,7 +375,7 @@ class ActionRunner:
             if bearing is not None and abs(bearing) > deadband:
                 dx = int(round(max(-240.0, min(240.0, bearing * steer_gain))))
                 if dx != 0:
-                    self.input.mouse_delta(dx, 0, steps=1, duration_s=0.0)
+                    self._steer_camera(dx, 0)
             return None
 
         return self._run_loop(
@@ -369,6 +383,23 @@ class ActionRunner:
             config=cfg,
             on_tick=_on_tick,
             initial_keys=keys,
+        )
+
+    def follow_blue_ally(
+        self,
+        sprint: bool = False,
+        arrive_distance: float = 0.14,
+        steer_gain: float = 160.0,
+        config: Optional[LoopConfig] = None,
+    ) -> LoopResult:
+        """Walk/jog back to nearest blue ally minimap blip (e.g. Michael & Brad crew tether)."""
+        return self.follow_route_on_foot(
+            sprint=sprint,
+            target_color="blue",
+            arrive_distance=arrive_distance,
+            steer_gain=steer_gain,
+            stop_on_subtitle_keywords=(),
+            config=config,
         )
 
     def follow_gps_drive(

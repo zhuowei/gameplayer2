@@ -158,7 +158,8 @@ Calibrated bottom-left 16:9 minimap parser extracting:
 
 Fast local ~8–12 Hz perception + control loops (`ActionRunner`) combining `capture_game_window`, `inspect_minimap`, `inspect_frame`, and `InputController`:
 - `run_until_event(hold_keys=..., hold_buttons=..., predicate=..., config=...)`
-- `follow_route_on_foot(sprint=False, target_color="yellow", ...)`
+- `follow_route_on_foot(sprint=False, target_color="yellow", stop_on_subtitle_keywords=("return to", "wait for", "stay with", "follow"), ...)`: automatically aborts forward movement if a crew-tether warning subtitle/help prompt appears (preventing `"The crew were left behind."` fails).
+- `follow_blue_ally(sprint=False, arrive_distance=0.14, ...)`: steers back to the nearest blue ally blip (e.g., Michael & Brad during Prologue yard/gate exit—do NOT sprint far down the road alone!).
 - `follow_gps_drive(route_color="yellow", ...)` (includes automatic visual-motion stuck-car recovery: reverses `s` + counter-steers for `0.8s` if road motion stalls for `1.5s`)
 - `combat_burst_scan(aim_button="right", fire_button="left", ...)`
 - `aim_until_red_reticle(...)` / `aim_and_shoot(...)` / `hostage_shot(...)`: holds aim (`right`), sweeps/steers until `detect_red_reticle()` detects hostile red reticle contrast at `(0.5, 0.5)`, and fires precision `left` bursts (strictly waits for red reticle).
