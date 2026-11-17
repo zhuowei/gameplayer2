@@ -580,7 +580,7 @@ class ActionRunner:
         stop_on_subtitle_keywords: Sequence[str] = ("get in", "enter", "vehicle", "car"),
         tether_subtitle_keywords: Sequence[str] = ("return to", "wait for", "stay with", "follow"),
         enable_stuck_recovery: bool = True,
-        stuck_window_s: float = 1.5,
+        stuck_window_s: float = 0.9,
         stuck_motion_threshold: float = 2.5,
         unstuck_duration_s: float = 0.55,
         vault_on_stuck: bool = True,
