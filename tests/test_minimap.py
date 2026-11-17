@@ -188,3 +188,48 @@ def test_minimap_rejects_magenta_police_siren_flash_and_detects_true_enemy(tmp_p
     assert len(obs.targets["red"]) == 1
     assert obs.nearest_enemy is not None
     assert abs(obs.nearest_enemy.bearing) < 0.05
+
+
+def test_minimap_calibrated_bars_and_blue_siren_wash_filtering(tmp_path) -> None:
+    # 1) Depleted green bar (50% bright green fill, 50% empty dark-green track),
+    #    empty slate-blue armor track, and locked Prologue ochre special bar.
+    w, h = 1280, 720
+    img = Image.new("RGB", (w, h), (30, 35, 42))
+    draw = ImageDraw.Draw(img)
+
+    rx0, ry0, rx1, ry1 = [int(round(MINIMAP_RADAR_BOX[i] * (w if i % 2 == 0 else h))) for i in range(4)]
+    draw.rectangle((rx0, ry0, rx1, ry1), fill=(72, 68, 70))
+
+    hx0, hy0, hx1, hy1 = [int(round(HEALTH_BAR_BOX[i] * (w if i % 2 == 0 else h))) for i in range(4)]
+    mid_x = hx0 + (hx1 - hx0) // 2
+    draw.rectangle((hx0, hy0, mid_x, hy1), fill=(78, 145, 78))
+    draw.rectangle((mid_x + 1, hy0, hx1, hy1), fill=(42, 88, 42))  # empty dark-green track
+
+    ax0, ay0, ax1, ay1 = [int(round(ARMOR_BAR_BOX[i] * (w if i % 2 == 0 else h))) for i in range(4)]
+    draw.rectangle((ax0, ay0, ax1, ay1), fill=(33, 76, 100))  # empty slate-blue armor track
+
+    sx0, sy0, sx1, sy1 = [int(round(SPECIAL_BAR_BOX[i] * (w if i % 2 == 0 else h))) for i in range(4)]
+    draw.rectangle((sx0, sy0, sx1, sy1), fill=(80, 64, 22))  # locked Prologue ochre special bar
+
+    # Paint a large 20x15 blue siren road wash and a single 6x6 real ally blip
+    draw.rectangle((rx0 + 20, ry0 + 20, rx0 + 39, ry0 + 34), fill=(105, 142, 160))
+    draw.rectangle((rx0 + 90, ry0 + 60, rx0 + 95, ry0 + 65), fill=(93, 182, 229))
+
+    obs = inspect_minimap(img, logger=TelemetryLogger(tmp_path / "t1.jsonl"))
+    assert 0.45 <= obs.health_ratio <= 0.55
+    assert obs.armor_ratio == 0.0
+    assert obs.special_ratio == 0.0
+    assert len(obs.targets["blue"]) == 1
+
+    # 2) Red-vignette green bar & blue-siren green bar (70% full) must not drop out to 0.0
+    for fill_rgb, empty_rgb in [
+        ((127, 135, 80), (38, 87, 46)),
+        ((76, 114, 86), (40, 86, 58)),
+    ]:
+        img2 = img.copy()
+        d2 = ImageDraw.Draw(img2)
+        split_x = hx0 + int(round((hx1 - hx0) * 0.70))
+        d2.rectangle((hx0, hy0, split_x, hy1), fill=fill_rgb)
+        d2.rectangle((split_x + 1, hy0, hx1, hy1), fill=empty_rgb)
+        obs2 = inspect_minimap(img2, logger=TelemetryLogger(tmp_path / "t2.jsonl"))
+        assert 0.64 <= obs2.health_ratio <= 0.76

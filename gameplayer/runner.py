@@ -18,22 +18,25 @@ from gameplayer.window import CaptureResult, WindowBackend, WindowInfo, capture_
 
 DEFAULT_RETICLE_SWEEP: tuple[tuple[int, int], ...] = (
     (0, 0),
-    (22, 0),
-    (26, 0),
-    (-70, 0),
-    (-26, 0),
-    (48, 20),
-    (24, 0),
-    (26, 0),
-    (-74, 0),
-    (-26, 0),
-    (50, 18),
-    (24, 0),
-    (-48, 0),
-    (24, -52),
-    (24, 0),
-    (-48, 0),
-    (24, 14),
+    (36, 0),
+    (36, 0),
+    (-108, 0),
+    (-36, 0),
+    (72, -22),
+    (36, 0),
+    (36, 0),
+    (-108, 0),
+    (-36, 0),
+    (72, -26),
+    (36, 0),
+    (-72, 0),
+    (36, -30),
+    (36, 0),
+    (-72, 0),
+    (36, 88),
+    (36, 0),
+    (-72, 0),
+    (36, -10),
 )
 
 
@@ -488,9 +491,13 @@ class ActionRunner:
 
                 if low_motion_elapsed_s >= stuck_window_s and (cfg.max_duration_s - state.elapsed_s) > 0.25:
                     recovery_count += 1
-                    self._perform_on_foot_sidestep(recovery_count, last_bearing, unstuck_duration_s, vault_on_stuck)
+                    allow_vault = vault_on_stuck and (mm.nearest_enemy is None) and (
+                        not mm.minimap_visible or mm.health_ratio >= 0.65
+                    )
+                    self._perform_on_foot_sidestep(recovery_count, last_bearing, unstuck_duration_s, allow_vault)
                     low_motion_elapsed_s = 0.0
                     prev_gray = None
+                    last_motion_check_t = None
                     return None
 
             if bearing is not None and abs(bearing) > deadband:
@@ -533,16 +540,20 @@ class ActionRunner:
         move_phase_s: float = 2.2,
         engage_phase_s: float = 3.2,
         engage_distance: float = 0.65,
+        close_enemy_hold_distance: float = 0.28,
         min_engage_health: float = 0.45,
-        recover_health: float = 0.40,
+        recover_health: float = 0.50,
+        recover_target_health: float = 0.50,
         recover_wait_s: float = 2.5,
         use_special: bool = True,
-        recoil_comp_dy: int = 1,
+        recoil_comp_dy: int = 0,
         aim_settle_s: float = 0.15,
         exposed_recover_drop_threshold: float = 0.12,
         steer_gain: float = 160.0,
+        engage_steer_gain: float = 200.0,
         deadband: float = 0.06,
-        bearing_deadband: float = 0.10,
+        bearing_deadband: float = 0.025,
+        engage_align_bearing: float = 0.08,
         stop_on_subtitle_keywords: Sequence[str] = ("get in", "enter", "vehicle", "car"),
         tether_subtitle_keywords: Sequence[str] = ("return to", "wait for", "stay with", "follow"),
         enable_stuck_recovery: bool = True,
@@ -716,7 +727,7 @@ class ActionRunner:
                         )
                         return "low_health"
                 if phase == "recover":
-                    if now_t < phase_end_t and (not mm.minimap_visible or mm.health_ratio < min_engage_health):
+                    if now_t < phase_end_t and (not mm.minimap_visible or mm.health_ratio < recover_target_health):
                         return None
                     phase = "move"
                     phase_end_t = now_t + move_phase_s
@@ -728,17 +739,37 @@ class ActionRunner:
             need_ally_tether = (now_t < tether_active_until_t) or (
                 blue_ally is not None and blue_ally.distance > ally_tether_distance
             )
-            nav_bearing = blue_ally.bearing if (need_ally_tether and blue_ally is not None) else route_bearing
-
             enemy = mm.nearest_enemy
+            if need_ally_tether and blue_ally is not None:
+                nav_bearing = blue_ally.bearing
+            elif route_bearing is not None:
+                nav_bearing = route_bearing
+            elif blue_ally is not None and blue_ally.distance > 0.14:
+                nav_bearing = blue_ally.bearing
+            elif enemy is not None and enemy.distance > 0.35:
+                nav_bearing = enemy.bearing
+            else:
+                nav_bearing = None
+
             can_engage = (
                 enemy is not None
                 and enemy.distance <= engage_distance
                 and (not mm.minimap_visible or mm.health_ratio >= min_engage_health)
                 and not need_ally_tether
             )
+            hold_engage_threat = (
+                enemy is not None
+                and (
+                    enemy.distance <= close_enemy_hold_distance
+                    or (len(mm.targets["red"]) >= 3 and enemy.distance <= 0.40)
+                )
+                and (not mm.minimap_visible or mm.health_ratio >= min_engage_health)
+                and not need_ally_tether
+            )
 
-            if phase == "move" and can_engage and now_t >= min_move_until_t and now_t >= engage_cooldown_until_t:
+            if phase == "move" and can_engage and (
+                hold_engage_threat or (now_t >= min_move_until_t and now_t >= engage_cooldown_until_t)
+            ):
                 _set_movement(False)
                 phase = "engage"
                 phase_end_t = now_t + engage_phase_s
@@ -751,12 +782,15 @@ class ActionRunner:
             elif phase == "engage" and (
                 enemy is None or enemy.distance > engage_distance or need_ally_tether or now_t >= phase_end_t
             ):
-                _set_aim(False)
-                phase = "move"
-                phase_end_t = now_t + move_phase_s
-                min_move_until_t = now_t + move_phase_s
-                engage_cooldown_until_t = now_t + move_phase_s
-                _reset_motion_tracker()
+                if phase == "engage" and hold_engage_threat and now_t >= phase_end_t:
+                    phase_end_t = now_t + 1.5
+                else:
+                    _set_aim(False)
+                    phase = "move"
+                    phase_end_t = now_t + move_phase_s
+                    min_move_until_t = now_t + move_phase_s
+                    engage_cooldown_until_t = now_t + move_phase_s
+                    _reset_motion_tracker()
 
             if phase == "engage":
                 _set_movement(False)
@@ -771,10 +805,10 @@ class ActionRunner:
 
                 if enemy is not None:
                     if abs(enemy.bearing) > bearing_deadband:
-                        dx = int(round(max(-220.0, min(220.0, enemy.bearing * 200.0))))
+                        dx = self._ads_steer_dx(enemy.bearing, steer_gain=engage_steer_gain)
                         if dx != 0:
                             self._steer_camera(dx, 0)
-                    if abs(enemy.bearing) <= 0.22:
+                    if abs(enemy.bearing) <= engage_align_bearing:
                         aligned_ticks += 1
                         if aligned_ticks % 3 == 0:
                             self._fire_bursts("left", bursts=2, hold_s=0.03, gap_s=0.03, reason="suppressive")
@@ -813,7 +847,7 @@ class ActionRunner:
 
                 if low_motion_elapsed_s >= stuck_window_s and (cfg.max_duration_s - now_t) > 0.25:
                     recovery_count += 1
-                    allow_vault = vault_on_stuck and (not mm.minimap_visible or mm.health_ratio >= 0.50)
+                    allow_vault = vault_on_stuck and (enemy is None) and (not mm.minimap_visible or mm.health_ratio >= 0.65)
                     self._perform_on_foot_sidestep(recovery_count, last_bearing, unstuck_duration_s, allow_vault)
                     _reset_motion_tracker()
                     return None
@@ -950,6 +984,21 @@ class ActionRunner:
         finally:
             self.input.key_up(key)
 
+    @staticmethod
+    def _ads_steer_dx(
+        bearing: float,
+        steer_gain: float = 200.0,
+        min_step_px: int = 6,
+        max_step_px: int = 65,
+    ) -> int:
+        if bearing == 0.0:
+            return 0
+        raw = bearing * steer_gain
+        if abs(bearing) <= 0.35:
+            mag = max(min_step_px, min(max_step_px, int(round(abs(raw)))))
+            return mag if bearing > 0 else -mag
+        return int(round(max(-220.0, min(220.0, raw))))
+
     def _steer_camera(
         self,
         dx: int,
@@ -1062,13 +1111,14 @@ class ActionRunner:
         bursts: int = 2,
         stop_on_shot: bool = True,
         max_shots: int = 1,
-        steer_gain: float = 220.0,
-        bearing_deadband: float = 0.10,
+        steer_gain: float = 200.0,
+        bearing_deadband: float = 0.025,
         aim_settle_s: float = 0.18,
         scan_pattern: Sequence[tuple[int, int]] = DEFAULT_RETICLE_SWEEP,
         empty_scans_to_stop: Optional[int] = None,
         fallback_fire_on_aligned: bool = False,
         fallback_fire_interval_ticks: int = 6,
+        fallback_fire_max_bearing: float = 0.08,
         reacquire_aim_interval_ticks: Optional[int] = None,
         cover_on_health_drop: bool = False,
         config: Optional[LoopConfig] = None,
@@ -1121,7 +1171,7 @@ class ActionRunner:
 
                 if consecutive_steer_ticks < 4 or abs(enemy.bearing) > 0.35:
                     aligned_without_lock_ticks = 0
-                    dx = int(round(max(-220.0, min(220.0, enemy.bearing * steer_gain))))
+                    dx = self._ads_steer_dx(enemy.bearing, steer_gain=steer_gain)
                     if dx != 0:
                         self._steer_camera(dx, 0, release_aim_button=aim_button if abs(dx) >= 60 else None)
                         if abs(dx) >= 30:
@@ -1136,7 +1186,7 @@ class ActionRunner:
                 aligned_without_lock_ticks = 0
                 if empty_scans_to_stop is not None and no_enemy_ticks >= empty_scans_to_stop:
                     return "enemies_cleared"
-            else:
+            elif abs(enemy.bearing) <= fallback_fire_max_bearing:
                 no_enemy_ticks = 0
                 aligned_without_lock_ticks += 1
                 if (
@@ -1161,6 +1211,9 @@ class ActionRunner:
                     if aim_settle_s > 0:
                         self._sleep(aim_settle_s)
                     return None
+            else:
+                no_enemy_ticks = 0
+                aligned_without_lock_ticks = 0
 
             if scan_pattern:
                 dx, dy = scan_pattern[sweep_idx % len(scan_pattern)]
@@ -1251,10 +1304,11 @@ class ActionRunner:
         empty_scans_to_stop: Optional[int] = None,
         aim_button: str = "right",
         fire_button: str = "left",
-        steer_gain: float = 220.0,
-        bearing_deadband: float = 0.10,
+        steer_gain: float = 200.0,
+        bearing_deadband: float = 0.025,
+        suppressive_max_bearing: float = 0.12,
         aim_settle_s: float = 0.18,
-        recoil_comp_dy: int = 4,
+        recoil_comp_dy: int = 0,
         exposed_duck_drop_threshold: float = 0.12,
         flank_recovery_min_health: float = 0.55,
         max_unclamp_attempts: int = 1,
@@ -1545,14 +1599,14 @@ class ActionRunner:
                         large_steer_ticks = 0
                         # In-FOV yaw tracking: nudge smoothly every other tick without resetting sweep/fire.
                         if steer_cadence_ticks % 2 == 1:
-                            dx = int(round(max(-110.0, min(110.0, enemy.bearing * 130.0))))
+                            dx = self._ads_steer_dx(enemy.bearing, steer_gain=steer_gain)
                             if dx != 0:
                                 self._steer_camera(dx, 0)
                 else:
                     steer_cadence_ticks = 0
                     large_steer_ticks = 0
 
-                if abs(enemy.bearing) <= 0.30:
+                if abs(enemy.bearing) <= suppressive_max_bearing:
                     aligned_ticks += 1
                     if aligned_ticks % 3 == 0:
                         self._fire_bursts(fire_button, bursts=2, hold_s=0.03, gap_s=0.03, reason="suppressive")

@@ -500,8 +500,8 @@ def test_default_reticle_sweep_zero_net_drift_and_scans_torso_heights() -> None:
     for _, dy in DEFAULT_RETICLE_SWEEP:
         cum_y += dy
         ys.append(cum_y)
-    assert max(ys) >= 30
-    assert min(ys) < 0
+    assert min(ys) <= -60
+    assert max(ys) <= 15
 
 
 def test_cover_peek_combat_keeps_aim_held_and_fires_suppressive_within_fov(tmp_path) -> None:
@@ -509,8 +509,8 @@ def test_cover_peek_combat_keeps_aim_held_and_fires_suppressive_within_fov(tmp_p
     backend = RecordingInputBackend()
     ctrl = InputController(backend=backend, logger=TelemetryLogger(tmp_path / "t.jsonl"), clock=clock, sleep_fn=clock.sleep, register_signals=False)
 
-    # Enemy inside FOV (-0.25 bearing): must keep right-click held while steering/sweeping and fire suppressive bursts instead of aborting cover_clamped.
-    in_fov_frame = _with_center_reticle(make_synthetic_minimap_frame(health_ratio=0.95, red_points=[(0.30, 0.45)]), (245, 245, 245))
+    # Enemy inside FOV (-0.09 bearing): must keep right-click held while steering/sweeping and fire suppressive bursts instead of aborting cover_clamped.
+    in_fov_frame = _with_center_reticle(make_synthetic_minimap_frame(health_ratio=0.95, red_points=[(0.44, 0.45)]), (245, 245, 245))
     win_backend = ReplayWindowBackend(lambda idx: in_fov_frame)
     runner = ActionRunner(ctrl, win_backend, ScriptedHudOCR(lambda idx: {}), TelemetryLogger(tmp_path / "t.jsonl"), clock, clock.sleep)
 
@@ -535,9 +535,9 @@ def test_cover_peek_combat_fires_and_sweeps_through_bearing_jitter_and_logs_tele
     logger = TelemetryLogger(log_path)
     ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
 
-    # Bearing alternates left/right every tick (|delta| >= 0.30): must not reset aligned_ticks or starve sweep/fire.
-    f_left = _with_center_reticle(make_synthetic_minimap_frame(health_ratio=0.95, red_points=[(0.34, 0.45)]), (245, 245, 245))
-    f_right = _with_center_reticle(make_synthetic_minimap_frame(health_ratio=0.95, red_points=[(0.68, 0.45)]), (245, 245, 245))
+    # Bearing alternates left/right every tick (-0.104 <-> +0.104, |delta| >= 0.20): must not reset aligned_ticks or starve sweep/fire.
+    f_left = _with_center_reticle(make_synthetic_minimap_frame(health_ratio=0.95, red_points=[(0.43, 0.45)]), (245, 245, 245))
+    f_right = _with_center_reticle(make_synthetic_minimap_frame(health_ratio=0.95, red_points=[(0.57, 0.45)]), (245, 245, 245))
     win_backend = ReplayWindowBackend(lambda idx: f_left if idx % 2 == 0 else f_right)
     runner = ActionRunner(ctrl, win_backend, ScriptedHudOCR(lambda idx: {}), logger, clock, clock.sleep)
 
@@ -980,3 +980,64 @@ def test_advance_under_fire_retreats_or_aborts_when_exposed_during_recover(tmp_p
     assert any(r.get("action") == "advance_exposed" for r in read_telemetry(log_path2, tool="runner"))
     assert backend2.currently_held_keys == set()
     assert backend2.currently_held_buttons == set()
+
+
+def test_ads_fine_steering_handles_small_bearing_and_zero_recoil_default(tmp_path) -> None:
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    ctrl = InputController(backend=backend, logger=TelemetryLogger(tmp_path / "t.jsonl"), clock=clock, sleep_fn=clock.sleep, register_signals=False)
+
+    # Bearing ~0.05 (inside old 0.10 deadband, outside new 0.025 deadband) must produce non-zero dx steering and 0 net dy drift.
+    f_slight_right = _with_center_reticle(make_synthetic_minimap_frame(health_ratio=0.95, red_points=[(0.535, 0.45)]), (245, 245, 245))
+    runner = ActionRunner(ctrl, ReplayWindowBackend(lambda idx: f_slight_right), ScriptedHudOCR(lambda idx: {}), TelemetryLogger(tmp_path / "t.jsonl"), clock, clock.sleep)
+    res = runner.cover_peek_combat(
+        enter_cover=False,
+        use_special=False,
+        max_shots=2,
+        scan_pattern=(),
+        config=LoopConfig(max_duration_s=3.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert res.stop_reason == "suppressive_shots_done"
+    dxs = [ev[1][0] for ev in backend.events if ev[0] == "mouse_delta"]
+    dys = [ev[1][1] for ev in backend.events if ev[0] == "mouse_delta"]
+    assert any(dx > 0 for dx in dxs)
+    assert sum(dxs) >= 6
+    assert sum(dys) == 0
+
+
+def test_advance_under_fire_holds_close_engage_no_combat_vault_and_blue_fallback(tmp_path) -> None:
+    # 1) Close enemy (distance <= 0.25) holds engage past engage_phase_s and never vaults while red blips exist.
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    ctrl = InputController(backend=backend, logger=TelemetryLogger(tmp_path / "t1.jsonl"), clock=clock, sleep_fn=clock.sleep, register_signals=False)
+    f_close = make_synthetic_minimap_frame(
+        health_ratio=0.90,
+        blue_points=[(0.50, 0.72)],
+        red_points=[(0.50, 0.62)],  # distance ~ 0.195 <= 0.28
+    )
+    runner = ActionRunner(ctrl, ReplayWindowBackend(lambda idx: f_close), ScriptedHudOCR(lambda idx: {}), TelemetryLogger(tmp_path / "t1.jsonl"), clock, clock.sleep)
+    runner.advance_under_fire(
+        move_phase_s=0.2,
+        engage_phase_s=0.4,
+        stuck_window_s=0.3,
+        vault_on_stuck=True,
+        config=LoopConfig(max_duration_s=1.2, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert ("key_down", "space") not in backend.events
+    # Aim stayed held instead of dropping to move past engage_phase_s=0.4s
+    assert backend.events.count(("mouse_up", "right")) == 1
+
+    # 2) When yellow == [] and blue ally is ahead-right (> 0.14, <= 0.28), steers toward blue ally instead of blind W.
+    clock2 = FakeClock()
+    backend2 = RecordingInputBackend()
+    ctrl2 = InputController(backend=backend2, logger=TelemetryLogger(tmp_path / "t2.jsonl"), clock=clock2, sleep_fn=clock2.sleep, register_signals=False)
+    f_blue_right = make_synthetic_minimap_frame(
+        health_ratio=0.90,
+        blue_points=[(0.65, 0.62)],  # distance ~ 0.25 (inside 0.28 tether, > 0.14 fallback), bearing > 0.2
+    )
+    runner2 = ActionRunner(ctrl2, ReplayWindowBackend(lambda idx: f_blue_right), ScriptedHudOCR(lambda idx: {}), TelemetryLogger(tmp_path / "t2.jsonl"), clock2, clock2.sleep)
+    runner2.advance_under_fire(
+        config=LoopConfig(max_duration_s=0.5, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert any(ev[0] == "mouse_delta" and ev[1][0] > 0 for ev in backend2.events)
+    assert backend2.currently_held_keys == set()

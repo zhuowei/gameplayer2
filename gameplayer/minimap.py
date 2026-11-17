@@ -86,39 +86,46 @@ def _crop_box(arr: np.ndarray, box: NormalizedBox) -> np.ndarray:
     return arr[y0:y1, x0:x1]
 
 
-def _extract_health_ratio(bar_rgb: np.ndarray) -> float:
-    r = bar_rgb[:, :, 0].astype(np.int16)
-    g = bar_rgb[:, :, 1].astype(np.int16)
-    b = bar_rgb[:, :, 2].astype(np.int16)
-    # Healthy green bar OR low-health red/orange bar
-    green_mask = (g - r > 12) & (g - b > 12) & (g > 70)
-    low_red_mask = (r - g > 25) & (r - b > 25) & (r > 110)
-    col_active = np.any(green_mask | low_red_mask, axis=0)
-    if col_active.size == 0:
+def _bar_interior(bar_rgb: np.ndarray) -> np.ndarray:
+    return bar_rgb[1:-1] if bar_rgb.shape[0] >= 4 else bar_rgb
+
+
+def _bar_fill_ratio(active_mask: np.ndarray) -> float:
+    if active_mask.size == 0 or active_mask.shape[1] == 0:
+        return 0.0
+    col_active = np.mean(active_mask, axis=0) >= 0.35
+    if int(np.count_nonzero(col_active)) < 2:
         return 0.0
     return float(np.mean(col_active))
+
+
+def _extract_health_ratio(bar_rgb: np.ndarray) -> float:
+    interior = _bar_interior(bar_rgb)
+    r = interior[:, :, 0].astype(np.int16)
+    g = interior[:, :, 1].astype(np.int16)
+    b = interior[:, :, 2].astype(np.int16)
+    # Healthy green bar (tolerates blue siren & red damage vignette bleed) OR pulsing low-health red bar
+    green_mask = (g >= 110) & ((g - r) >= 5) & ((g - b) >= 15)
+    low_red_mask = (r >= 120) & (g <= 60) & ((r - g) >= 85) & ((r - b) >= 75)
+    return _bar_fill_ratio(green_mask | low_red_mask)
 
 
 def _extract_armor_ratio(bar_rgb: np.ndarray) -> float:
-    r = bar_rgb[:, :, 0].astype(np.int16)
-    g = bar_rgb[:, :, 1].astype(np.int16)
-    b = bar_rgb[:, :, 2].astype(np.int16)
-    blue_mask = (b - r > 15) & (b > 85) & (np.maximum(np.maximum(r, g), b) - np.minimum(np.minimum(r, g), b) > 18)
-    col_active = np.any(blue_mask, axis=0)
-    if col_active.size == 0:
-        return 0.0
-    return float(np.mean(col_active))
+    interior = _bar_interior(bar_rgb)
+    r = interior[:, :, 0].astype(np.int16)
+    g = interior[:, :, 1].astype(np.int16)
+    b = interior[:, :, 2].astype(np.int16)
+    blue_mask = (b >= 150) & (g >= 110) & ((b - r) >= 65)
+    return _bar_fill_ratio(blue_mask)
 
 
 def _extract_special_ratio(bar_rgb: np.ndarray) -> float:
-    r = bar_rgb[:, :, 0].astype(np.int16)
-    g = bar_rgb[:, :, 1].astype(np.int16)
-    b = bar_rgb[:, :, 2].astype(np.int16)
-    yellow_mask = (r >= 65) & (g >= 55) & ((r - b) >= 28) & ((g - b) >= 20)
-    col_active = np.any(yellow_mask, axis=0)
-    if col_active.size == 0:
-        return 0.0
-    return float(np.mean(col_active))
+    interior = _bar_interior(bar_rgb)
+    r = interior[:, :, 0].astype(np.int16)
+    g = interior[:, :, 1].astype(np.int16)
+    b = interior[:, :, 2].astype(np.int16)
+    yellow_mask = (r >= 145) & (g >= 110) & ((r - b) >= 70) & ((g - b) >= 45)
+    return _bar_fill_ratio(yellow_mask)
 
 
 def _color_masks(radar_rgb: np.ndarray) -> dict[str, np.ndarray]:
@@ -137,7 +144,7 @@ def _color_masks(radar_rgb: np.ndarray) -> dict[str, np.ndarray]:
             & ((r - b) >= 95)
             & (np.abs(g - b) <= 12)
         ),
-        "blue": (b >= 150) & (r <= 115) & (g >= 75) & ((b - r) >= 45),
+        "blue": (b >= 180) & (r <= 115) & (g >= 125) & ((b - r) >= 75) & ((b - g) >= 28),
     }
 
 
@@ -163,6 +170,9 @@ def _extract_components(
     if len(pts) < min_pixels:
         return ()
 
+    scale = (h * w) / (180.0 * 116.0)
+    max_pixels = max(120, int(round(120.0 * scale))) if kind in ("red", "blue") else None
+
     active = set((int(y), int(x)) for y, x in pts)
     visited: set[tuple[int, int]] = set()
     targets: list[RadarTarget] = []
@@ -184,6 +194,8 @@ def _extract_components(
                         queue.append(nb)
 
         if len(comp) < min_pixels:
+            continue
+        if max_pixels is not None and len(comp) > max_pixels:
             continue
         mean_y = sum(p[0] for p in comp) / len(comp)
         mean_x = sum(p[1] for p in comp) / len(comp)
