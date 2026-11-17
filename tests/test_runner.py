@@ -1275,3 +1275,96 @@ def test_advance_under_fire_avoids_passive_regen_cap_recover_loop(tmp_path) -> N
     assert any(r.get("action") == "fire_burst" for r in logs)
     assert backend.currently_held_keys == set()
     assert backend.currently_held_buttons == set()
+
+
+def test_advance_under_fire_point_blank_enemy_and_no_retreat_spam(tmp_path) -> None:
+    # A) < 0.25 HP with point-blank enemy (< 0.18) and nearby ally (0.17 <= 0.20) aborts "low_health" on tick 1 without retreat spam.
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    log_path = tmp_path / "t_pb1.jsonl"
+    logger = TelemetryLogger(log_path)
+    ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
+    f_pb = make_synthetic_minimap_frame(
+        health_ratio=0.22,
+        blue_points=[(0.42, 0.72)],   # distance ~ 0.16 <= 0.20
+        red_points=[(0.50, 0.66)],    # point-blank enemy < 0.18
+    )
+    runner = ActionRunner(ctrl, ReplayWindowBackend(lambda idx: f_pb), ScriptedHudOCR(lambda idx: {}), logger, clock, clock.sleep)
+    res = runner.advance_under_fire(config=LoopConfig(max_duration_s=1.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None))
+    assert res.stop_reason == "low_health"
+    assert res.ticks == 1
+    logs = read_telemetry(log_path, tool="runner")
+    assert not any(r.get("action") == "advance_retreat" for r in logs)
+
+    # B) 0.28 HP (>= 0.25) with point-blank enemy (< 0.18) and distant ally engages/fires instead of sprinting past enemy.
+    clock2 = FakeClock()
+    backend2 = RecordingInputBackend()
+    log_path2 = tmp_path / "t_pb2.jsonl"
+    logger2 = TelemetryLogger(log_path2)
+    ctrl2 = InputController(backend=backend2, logger=logger2, clock=clock2, sleep_fn=clock2.sleep, register_signals=False)
+    f_pb_shoot = _with_center_reticle(
+        make_synthetic_minimap_frame(
+            health_ratio=0.28,
+            blue_points=[(0.20, 0.77)],
+            red_points=[(0.50, 0.66)],
+        ),
+        (245, 30, 30),
+    )
+    runner2 = ActionRunner(ctrl2, ReplayWindowBackend(lambda idx: f_pb_shoot), ScriptedHudOCR(lambda idx: {}), logger2, clock2, clock2.sleep)
+    runner2.advance_under_fire(
+        aim_settle_s=0.0,
+        config=LoopConfig(max_duration_s=0.4, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    logs2 = read_telemetry(log_path2, tool="runner")
+    assert not any(r.get("action") == "advance_retreat" for r in logs2)
+    assert any(r.get("action") == "fire_burst" for r in logs2)
+
+    # C) < 0.25 HP with distant ally (> 0.20) triggers advance_retreat ONCE, then aborts "low_health" if HP keeps dropping (0.22 -> 0.16) instead of spamming 7x.
+    clock3 = FakeClock()
+    backend3 = RecordingInputBackend()
+    log_path3 = tmp_path / "t_pb3.jsonl"
+    logger3 = TelemetryLogger(log_path3)
+    ctrl3 = InputController(backend=backend3, logger=logger3, clock=clock3, sleep_fn=clock3.sleep, register_signals=False)
+    f_dist_ally = make_synthetic_minimap_frame(health_ratio=0.22, blue_points=[(0.20, 0.77)])
+    f_dist_drop = make_synthetic_minimap_frame(health_ratio=0.16, blue_points=[(0.20, 0.77)])
+    runner3 = ActionRunner(
+        ctrl3,
+        ReplayWindowBackend(lambda idx: f_dist_ally if idx == 0 else f_dist_drop),
+        ScriptedHudOCR(lambda idx: {}),
+        logger3,
+        clock3,
+        clock3.sleep,
+    )
+    res3 = runner3.advance_under_fire(config=LoopConfig(max_duration_s=1.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None))
+    assert res3.stop_reason == "low_health"
+    retreats3 = [r for r in read_telemetry(log_path3, tool="runner") if r.get("action") == "advance_retreat"]
+    assert len(retreats3) == 1
+    assert backend3.currently_held_keys == set()
+
+
+def test_run_loop_logs_changed_hud_prompt_text(tmp_path) -> None:
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    log_path = tmp_path / "t_hud_log.jsonl"
+    logger = TelemetryLogger(log_path)
+    ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
+    f_plain = make_synthetic_minimap_frame(health_ratio=0.90, yellow_points=[(0.50, 0.25)])
+
+    def _ocr(idx: int):
+        if idx < 2:
+            return {"bottom_subtitle": [OcrLine("Clear the yard.", 0.95, (0.2, 0.8, 0.6, 0.1))]}
+        return {
+            "bottom_subtitle": [OcrLine("Hold off the police.", 0.95, (0.2, 0.8, 0.6, 0.1))],
+            "top_left_help": [OcrLine("Press Q to take cover.", 0.95, (0.05, 0.05, 0.3, 0.1))],
+        }
+
+    runner = ActionRunner(ctrl, ReplayWindowBackend(lambda idx: f_plain), ScriptedHudOCR(_ocr), logger, clock, clock.sleep)
+    runner.advance_under_fire(
+        config=LoopConfig(max_duration_s=0.35, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    hud_logs = [r for r in read_telemetry(log_path, tool="runner") if r.get("action") == "hud_prompt"]
+    assert len(hud_logs) == 2
+    assert hud_logs[0]["details"]["subtitle_or_objective"] == "Clear the yard."
+    assert hud_logs[1]["details"]["subtitle_or_objective"] == "Hold off the police."
+    assert hud_logs[1]["details"]["help_prompt"] == "Press Q to take cover."
+    assert backend.currently_held_keys == set()

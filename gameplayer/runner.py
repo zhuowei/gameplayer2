@@ -205,6 +205,8 @@ class ActionRunner:
         last_hud_t = -1e9
         baseline_help: Optional[str] = None
         baseline_subtitle: Optional[str] = None
+        last_logged_help = ""
+        last_logged_subtitle = ""
         baseline_health: Optional[float] = None
         last_hud: Optional[HudObservation] = None
         last_minimap: Optional[MinimapObservation] = None
@@ -283,6 +285,23 @@ class ActionRunner:
                             stop_reason = "subtitle_changed"
                             ticks += 1
                             break
+
+                        help_changed = bool(hud.help_prompt) and hud.help_prompt != last_logged_help
+                        sub_changed = bool(hud.subtitle_or_objective) and hud.subtitle_or_objective != last_logged_subtitle
+                        if help_changed or sub_changed:
+                            prompt_details: dict[str, Any] = {}
+                            if help_changed:
+                                last_logged_help = hud.help_prompt
+                                prompt_details["help_prompt"] = hud.help_prompt[:160]
+                            if sub_changed:
+                                last_logged_subtitle = hud.subtitle_or_objective
+                                prompt_details["subtitle_or_objective"] = hud.subtitle_or_objective[:160]
+                            self._logger.log(
+                                tool="runner",
+                                action="hud_prompt",
+                                status="ok",
+                                details=prompt_details,
+                            )
 
                     state = FrameState(
                         tick=ticks,
@@ -617,6 +636,7 @@ class ActionRunner:
         recover_cooldown_until_t = 0.0
         tether_active_until_t = 0.0
         recover_start_health: Optional[float] = None
+        retreat_start_health: Optional[float] = None
         special_triggered = False
 
         prev_gray: Optional[np.ndarray] = None
@@ -666,7 +686,7 @@ class ActionRunner:
                 self.input.mouse_up("right")
 
         def _on_tick(state: FrameState) -> Optional[str]:
-            nonlocal phase, phase_end_t, min_move_until_t, engage_cooldown_until_t, recover_cooldown_until_t, tether_active_until_t, recover_start_health, special_triggered, prev_gray, last_motion_check_t, low_motion_elapsed_s, last_bearing, recovery_count, sweep_idx, sweep_offset_x, sweep_offset_y, aligned_ticks
+            nonlocal phase, phase_end_t, min_move_until_t, engage_cooldown_until_t, recover_cooldown_until_t, tether_active_until_t, recover_start_health, retreat_start_health, special_triggered, prev_gray, last_motion_check_t, low_motion_elapsed_s, last_bearing, recovery_count, sweep_idx, sweep_offset_x, sweep_offset_y, aligned_ticks
             now_t = state.elapsed_s
             mm = state.minimap
 
@@ -699,10 +719,13 @@ class ActionRunner:
 
             def _resume_move_from_recover(*, tether: bool = False, cooldown_s: float = 0.0) -> None:
                 nonlocal phase, phase_end_t, min_move_until_t, engage_cooldown_until_t
-                nonlocal recover_cooldown_until_t, recover_start_health, tether_active_until_t
+                nonlocal recover_cooldown_until_t, recover_start_health, retreat_start_health, tether_active_until_t
                 phase = "move"
                 if tether:
                     tether_active_until_t = max(tether_active_until_t, now_t + 2.5)
+                    retreat_start_health = mm.health_ratio
+                else:
+                    retreat_start_health = None
                 phase_end_t = now_t + move_phase_s
                 min_move_until_t = now_t + move_phase_s
                 engage_cooldown_until_t = now_t + move_phase_s
@@ -727,9 +750,38 @@ class ActionRunner:
                 _reset_motion_tracker()
                 _set_aim(True)
 
+            def _abort_low_health(*, tap_cover: bool) -> str:
+                _set_aim(False)
+                _set_movement(False)
+                if tap_cover:
+                    self._tap_key_preserving_held("q", hold_s=0.08)
+                self._logger.log(
+                    tool="runner",
+                    action="advance_exposed",
+                    status="ok",
+                    details={"health_ratio": round(mm.health_ratio, 3)},
+                )
+                return "low_health"
+
+            point_blank_enemy = enemy is not None and enemy.distance < 0.18
+            can_retreat_to_ally = (
+                (not point_blank_enemy)
+                and (now_t >= tether_active_until_t)
+                and (blue_ally is not None and blue_ally.distance > 0.20)
+            )
+
             # Low-health cover/recover phase (critical < 0.25 HP bypasses recover cooldown)
+            mid_retreat = now_t < tether_active_until_t
+            retreat_drop = (
+                mid_retreat
+                and retreat_start_health is not None
+                and (retreat_start_health - mm.health_ratio) >= exposed_recover_drop_threshold
+            )
+            if mid_retreat and mm.minimap_visible and mm.health_ratio < 0.25 and (point_blank_enemy or retreat_drop):
+                return _abort_low_health(tap_cover=True)
             if (
                 phase != "recover"
+                and (not mid_retreat)
                 and mm.minimap_visible
                 and (
                     mm.health_ratio < 0.25
@@ -738,22 +790,30 @@ class ActionRunner:
             ):
                 _set_aim(False)
                 _set_movement(False)
-                if mm.health_ratio < 0.25 and (blue_ally is None or blue_ally.distance <= 0.14):
-                    self._tap_key_preserving_held("q", hold_s=0.08)
-                    self._logger.log(
-                        tool="runner",
-                        action="advance_exposed",
-                        status="ok",
-                        details={"health_ratio": round(mm.health_ratio, 3)},
-                    )
-                    return "low_health"
-                if (
-                    blue_ally is not None
+                if mm.health_ratio < 0.25:
+                    if can_retreat_to_ally and now_t >= recover_cooldown_until_t:
+                        _resume_move_from_recover(tether=True, cooldown_s=1.5)
+                        self._logger.log(
+                            tool="runner",
+                            action="advance_retreat",
+                            status="ok",
+                            details={
+                                "health_ratio": round(mm.health_ratio, 3),
+                                "ally_distance": round(blue_ally.distance, 3),
+                                "enemy_distance": round(enemy.distance, 3) if enemy is not None else None,
+                            },
+                        )
+                    else:
+                        return _abort_low_health(tap_cover=True)
+                elif point_blank_enemy and enemy.distance <= engage_distance:
+                    _enter_engage_phase(cooldown_s=1.5)
+                elif (
+                    (not point_blank_enemy)
+                    and blue_ally is not None
                     and blue_ally.distance > 0.14
-                    and (
-                        mm.health_ratio < 0.25
-                        or (enemy is not None and enemy.distance < 0.45 and abs(blue_ally.bearing) > 0.35)
-                    )
+                    and enemy is not None
+                    and enemy.distance < 0.45
+                    and abs(blue_ally.bearing) > 0.35
                 ):
                     _resume_move_from_recover(tether=True, cooldown_s=1.5)
                     self._logger.log(
@@ -763,7 +823,7 @@ class ActionRunner:
                         details={
                             "health_ratio": round(mm.health_ratio, 3),
                             "ally_distance": round(blue_ally.distance, 3),
-                            "enemy_distance": round(enemy.distance, 3) if enemy is not None else None,
+                            "enemy_distance": round(enemy.distance, 3),
                         },
                     )
                 else:
@@ -789,7 +849,18 @@ class ActionRunner:
                 )
                 critical_hp = mm.minimap_visible and mm.health_ratio < 0.25
                 if exposed_drop or critical_hp:
-                    if blue_ally is not None and blue_ally.distance > 0.14:
+                    if critical_hp:
+                        if can_retreat_to_ally:
+                            _resume_move_from_recover(tether=True, cooldown_s=1.5)
+                            self._logger.log(
+                                tool="runner",
+                                action="advance_retreat",
+                                status="ok",
+                                details={"health_ratio": round(mm.health_ratio, 3), "ally_distance": round(blue_ally.distance, 3)},
+                            )
+                        else:
+                            return _abort_low_health(tap_cover=False)
+                    elif (not point_blank_enemy) and blue_ally is not None and blue_ally.distance > 0.14:
                         _resume_move_from_recover(tether=True, cooldown_s=1.5)
                         self._logger.log(
                             tool="runner",
@@ -797,16 +868,6 @@ class ActionRunner:
                             status="ok",
                             details={"health_ratio": round(mm.health_ratio, 3), "ally_distance": round(blue_ally.distance, 3)},
                         )
-                    elif critical_hp:
-                        _set_aim(False)
-                        _set_movement(False)
-                        self._logger.log(
-                            tool="runner",
-                            action="advance_exposed",
-                            status="ok",
-                            details={"health_ratio": round(mm.health_ratio, 3)},
-                        )
-                        return "low_health"
                     elif enemy is not None and enemy.distance < 0.45:
                         recovery_count += 1
                         self._perform_on_foot_backpedal(attempt=recovery_count, duration_s=0.4)
@@ -819,8 +880,12 @@ class ActionRunner:
                         return None
                     _resume_move_from_recover()
 
-            need_ally_tether = (now_t < tether_active_until_t) or (
-                blue_ally is not None and blue_ally.distance > ally_tether_distance
+            need_ally_tether = (
+                (not point_blank_enemy)
+                and (
+                    (now_t < tether_active_until_t)
+                    or (blue_ally is not None and blue_ally.distance > ally_tether_distance)
+                )
             )
             if need_ally_tether and blue_ally is not None:
                 nav_bearing = blue_ally.bearing
