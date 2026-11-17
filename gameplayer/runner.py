@@ -408,9 +408,10 @@ class ActionRunner:
         duration_s: float,
         vault: bool,
     ) -> None:
-        if last_bearing < -0.05:
+        # After 2 failed attempts in bearing direction, alternate left/right instead of grinding one obstacle side.
+        if attempt < 3 and last_bearing < -0.05:
             sidestep_key = "a"
-        elif last_bearing > 0.05:
+        elif attempt < 3 and last_bearing > 0.05:
             sidestep_key = "d"
         else:
             sidestep_key = "d" if attempt % 2 == 1 else "a"
@@ -425,13 +426,27 @@ class ActionRunner:
                 "vault": vault,
             },
         )
-        self.input.key_down(sidestep_key)
+        # Release held forward movement ("w"/"lshift") during sidestep so Trevor doesn't keep pressing into the obstacle.
+        held_forward = [k for k in ("lshift", "w") if k in self.input.held_keys]
+        for k in held_forward:
+            self.input.key_up(k)
         try:
-            if vault:
-                self._tap_key_preserving_held("space", hold_s=0.06)
-            self._sleep_chunked(duration_s)
+            if attempt >= 2:
+                self.input.key_down("s")
+                try:
+                    self._sleep_chunked(min(0.2, duration_s * 0.5))
+                finally:
+                    self.input.key_up("s")
+            self.input.key_down(sidestep_key)
+            try:
+                if vault:
+                    self._tap_key_preserving_held("space", hold_s=0.06)
+                self._sleep_chunked(duration_s)
+            finally:
+                self.input.key_up(sidestep_key)
         finally:
-            self.input.key_up(sidestep_key)
+            for k in reversed(held_forward):
+                self.input.key_down(k)
 
     def _perform_on_foot_backpedal(self, attempt: int, duration_s: float = 0.4) -> None:
         """Briefly backpedal diagonally away from close exposed fire."""

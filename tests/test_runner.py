@@ -1506,3 +1506,26 @@ def test_advance_under_fire_no_backward_ally_steer_and_crossfire_lateral_reposit
     assert len(sidesteps) >= 1
     assert ("key_down", "w") not in backend2.events
     assert backend2.currently_held_keys == set()
+
+
+def test_on_foot_sidestep_releases_w_backs_off_and_alternates_after_attempt_3(tmp_path) -> None:
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    log_path = tmp_path / "t_sidestep.jsonl"
+    logger = TelemetryLogger(log_path)
+    ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
+    # Static frame with bearing > +0.05 (ally right): attempts 1..2 use 'd', attempt 3+ alternates to 'a' and backs off ('s'), releasing 'w' during sidestep.
+    f_stuck = make_synthetic_minimap_frame(health_ratio=0.90, blue_points=[(0.65, 0.62)])
+    runner = ActionRunner(ctrl, ReplayWindowBackend(lambda idx: f_stuck), ScriptedHudOCR(lambda idx: {}), logger, clock, clock.sleep)
+    runner.advance_under_fire(
+        stuck_window_s=0.3,
+        unstuck_duration_s=0.2,
+        config=LoopConfig(max_duration_s=2.6, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    recs = [r for r in read_telemetry(log_path, tool="runner") if r.get("action") == "on_foot_stuck_recovery"]
+    assert len(recs) >= 4
+    keys = [r["details"]["sidestep_key"] for r in recs]
+    assert "d" in keys and "a" in keys
+    assert ("key_up", "w") in backend.events
+    assert ("key_down", "s") in backend.events
+    assert backend.currently_held_keys == set()
