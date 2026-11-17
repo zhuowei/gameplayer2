@@ -727,16 +727,19 @@ class ActionRunner:
                 _reset_motion_tracker()
                 _set_aim(True)
 
-            # Low-health cover/recover phase
+            # Low-health cover/recover phase (critical < 0.25 HP bypasses recover cooldown)
             if (
                 phase != "recover"
-                and now_t >= recover_cooldown_until_t
                 and mm.minimap_visible
-                and mm.health_ratio < recover_health
+                and (
+                    mm.health_ratio < 0.25
+                    or (now_t >= recover_cooldown_until_t and mm.health_ratio < recover_health)
+                )
             ):
                 _set_aim(False)
                 _set_movement(False)
                 if mm.health_ratio < 0.25 and (blue_ally is None or blue_ally.distance <= 0.14):
+                    self._tap_key_preserving_held("q", hold_s=0.08)
                     self._logger.log(
                         tool="runner",
                         action="advance_exposed",
@@ -745,11 +748,12 @@ class ActionRunner:
                     )
                     return "low_health"
                 if (
-                    enemy is not None
-                    and enemy.distance < 0.45
-                    and blue_ally is not None
+                    blue_ally is not None
                     and blue_ally.distance > 0.14
-                    and abs(blue_ally.bearing) > 0.35
+                    and (
+                        mm.health_ratio < 0.25
+                        or (enemy is not None and enemy.distance < 0.45 and abs(blue_ally.bearing) > 0.35)
+                    )
                 ):
                     _resume_move_from_recover(tether=True, cooldown_s=1.5)
                     self._logger.log(
@@ -759,7 +763,7 @@ class ActionRunner:
                         details={
                             "health_ratio": round(mm.health_ratio, 3),
                             "ally_distance": round(blue_ally.distance, 3),
-                            "enemy_distance": round(enemy.distance, 3),
+                            "enemy_distance": round(enemy.distance, 3) if enemy is not None else None,
                         },
                     )
                 else:

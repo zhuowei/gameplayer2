@@ -1173,5 +1173,31 @@ def test_advance_under_fire_covers_on_timeout_and_backpedals_into_engage_and_abo
         config=LoopConfig(max_duration_s=2.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
     )
     assert res3.stop_reason == "low_health"
+    assert ("key_down", "q") in backend3.events
     assert not any(r.get("action") == "advance_recover" for r in read_telemetry(log_path3, tool="runner"))
     assert backend3.currently_held_keys == set()
+
+    # 3) Critical < 0.25 HP immediately after exiting recover bypasses the 3.0s recover cooldown.
+    clock4 = FakeClock()
+    backend4 = RecordingInputBackend()
+    log_path4 = tmp_path / "t_crit_cd.jsonl"
+    logger4 = TelemetryLogger(log_path4)
+    ctrl4 = InputController(backend=backend4, logger=logger4, clock=clock4, sleep_fn=clock4.sleep, register_signals=False)
+    f_enter_rec = make_synthetic_minimap_frame(health_ratio=0.40, yellow_points=[(0.50, 0.25)])
+    f_exit_rec = make_synthetic_minimap_frame(health_ratio=0.55, yellow_points=[(0.50, 0.25)])
+    f_burst_dmg = make_synthetic_minimap_frame(health_ratio=0.11, yellow_points=[(0.50, 0.25)])
+    runner4 = ActionRunner(
+        ctrl4,
+        ReplayWindowBackend(lambda idx: f_enter_rec if idx == 0 else (f_exit_rec if idx == 1 else f_burst_dmg)),
+        ScriptedHudOCR(lambda idx: {}),
+        logger4,
+        clock4,
+        clock4.sleep,
+    )
+    res4 = runner4.advance_under_fire(
+        recover_wait_s=0.2,
+        config=LoopConfig(max_duration_s=2.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert res4.stop_reason == "low_health"
+    assert res4.ticks <= 4
+    assert backend4.currently_held_keys == set()
