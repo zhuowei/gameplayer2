@@ -1351,7 +1351,9 @@ def test_run_loop_logs_changed_hud_prompt_text(tmp_path) -> None:
     f_plain = make_synthetic_minimap_frame(health_ratio=0.90, yellow_points=[(0.50, 0.25)])
 
     def _ocr(idx: int):
-        if idx < 2:
+        if idx == 0:
+            return {"bottom_subtitle": [OcrLine("rf", 0.90, (0.2, 0.8, 0.6, 0.1))], "top_left_help": [OcrLine("*", 0.90, (0.05, 0.05, 0.3, 0.1))]}
+        if idx < 3:
             return {"bottom_subtitle": [OcrLine("Clear the yard.", 0.95, (0.2, 0.8, 0.6, 0.1))]}
         return {
             "bottom_subtitle": [OcrLine("Hold off the police.", 0.95, (0.2, 0.8, 0.6, 0.1))],
@@ -1360,7 +1362,7 @@ def test_run_loop_logs_changed_hud_prompt_text(tmp_path) -> None:
 
     runner = ActionRunner(ctrl, ReplayWindowBackend(lambda idx: f_plain), ScriptedHudOCR(_ocr), logger, clock, clock.sleep)
     runner.advance_under_fire(
-        config=LoopConfig(max_duration_s=0.35, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+        config=LoopConfig(max_duration_s=0.45, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
     )
     hud_logs = [r for r in read_telemetry(log_path, tool="runner") if r.get("action") == "hud_prompt"]
     assert len(hud_logs) == 2
@@ -1368,3 +1370,26 @@ def test_run_loop_logs_changed_hud_prompt_text(tmp_path) -> None:
     assert hud_logs[1]["details"]["subtitle_or_objective"] == "Hold off the police."
     assert hud_logs[1]["details"]["help_prompt"] == "Press Q to take cover."
     assert backend.currently_held_keys == set()
+
+
+def test_advance_under_fire_caps_hold_engage_and_resumes_move(tmp_path) -> None:
+    # Even with >= 3 enemies at <= 0.40 distance, hold_engage_threat must cap at ~6.5s and actually move ("w") instead of stalling 100s behind cover.
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    ctrl = InputController(backend=backend, logger=TelemetryLogger(tmp_path / "t_cap.jsonl"), clock=clock, sleep_fn=clock.sleep, register_signals=False)
+    f_crowded = make_synthetic_minimap_frame(
+        health_ratio=0.90,
+        red_points=[(0.48, 0.56), (0.52, 0.55), (0.55, 0.57)],  # 3 enemies around ~0.30 distance
+    )
+    runner = ActionRunner(ctrl, ReplayWindowBackend(lambda idx: f_crowded), ScriptedHudOCR(lambda idx: {}), TelemetryLogger(tmp_path / "t_cap.jsonl"), clock, clock.sleep)
+    res = runner.advance_under_fire(
+        aim_settle_s=0.0,
+        move_phase_s=1.0,
+        engage_phase_s=1.5,
+        config=LoopConfig(max_duration_s=8.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert res.stop_reason == "timeout"
+    assert ("mouse_down", "right") in backend.events
+    assert ("key_down", "w") in backend.events
+    assert backend.currently_held_keys == set()
+    assert backend.currently_held_buttons == set()

@@ -286,16 +286,24 @@ class ActionRunner:
                             ticks += 1
                             break
 
-                        help_changed = bool(hud.help_prompt) and hud.help_prompt != last_logged_help
-                        sub_changed = bool(hud.subtitle_or_objective) and hud.subtitle_or_objective != last_logged_subtitle
+                        def _meaningful_hud_text(text: str) -> str:
+                            cleaned = text.strip()
+                            if len(cleaned) >= 4 and sum(1 for ch in cleaned if ch.isalnum()) >= 3:
+                                return cleaned
+                            return ""
+
+                        help_text = _meaningful_hud_text(hud.help_prompt)
+                        sub_text = _meaningful_hud_text(hud.subtitle_or_objective)
+                        help_changed = bool(help_text) and help_text != last_logged_help
+                        sub_changed = bool(sub_text) and sub_text != last_logged_subtitle
                         if help_changed or sub_changed:
                             prompt_details: dict[str, Any] = {}
                             if help_changed:
-                                last_logged_help = hud.help_prompt
-                                prompt_details["help_prompt"] = hud.help_prompt[:160]
+                                last_logged_help = help_text
+                                prompt_details["help_prompt"] = help_text[:160]
                             if sub_changed:
-                                last_logged_subtitle = hud.subtitle_or_objective
-                                prompt_details["subtitle_or_objective"] = hud.subtitle_or_objective[:160]
+                                last_logged_subtitle = sub_text
+                                prompt_details["subtitle_or_objective"] = sub_text[:160]
                             self._logger.log(
                                 tool="runner",
                                 action="hud_prompt",
@@ -633,6 +641,7 @@ class ActionRunner:
         phase_end_t = move_phase_s
         min_move_until_t = 0.0
         engage_cooldown_until_t = 0.0
+        engage_start_t = 0.0
         recover_cooldown_until_t = 0.0
         tether_active_until_t = 0.0
         recover_start_health: Optional[float] = None
@@ -686,7 +695,7 @@ class ActionRunner:
                 self.input.mouse_up("right")
 
         def _on_tick(state: FrameState) -> Optional[str]:
-            nonlocal phase, phase_end_t, min_move_until_t, engage_cooldown_until_t, recover_cooldown_until_t, tether_active_until_t, recover_start_health, retreat_start_health, special_triggered, prev_gray, last_motion_check_t, low_motion_elapsed_s, last_bearing, recovery_count, sweep_idx, sweep_offset_x, sweep_offset_y, aligned_ticks
+            nonlocal phase, phase_end_t, min_move_until_t, engage_cooldown_until_t, engage_start_t, recover_cooldown_until_t, tether_active_until_t, recover_start_health, retreat_start_health, special_triggered, prev_gray, last_motion_check_t, low_motion_elapsed_s, last_bearing, recovery_count, sweep_idx, sweep_offset_x, sweep_offset_y, aligned_ticks
             now_t = state.elapsed_s
             mm = state.minimap
 
@@ -735,10 +744,11 @@ class ActionRunner:
                 _reset_motion_tracker()
 
             def _enter_engage_phase(*, cooldown_s: float = 0.0) -> None:
-                nonlocal phase, phase_end_t, aligned_ticks, sweep_idx, sweep_offset_x, sweep_offset_y
+                nonlocal phase, phase_end_t, engage_start_t, aligned_ticks, sweep_idx, sweep_offset_x, sweep_offset_y
                 nonlocal recover_cooldown_until_t, recover_start_health
                 _set_movement(False)
                 phase = "engage"
+                engage_start_t = now_t
                 phase_end_t = now_t + engage_phase_s
                 aligned_ticks = 0
                 sweep_idx = 0
@@ -914,15 +924,25 @@ class ActionRunner:
                 and not need_ally_tether
             )
 
+            max_engage_hold_s = max(engage_phase_s * 2.0, 6.5)
             if phase == "move" and can_engage and (
-                hold_engage_threat or (now_t >= min_move_until_t and now_t >= engage_cooldown_until_t)
+                point_blank_enemy
+                or (
+                    now_t >= engage_cooldown_until_t
+                    and (hold_engage_threat or now_t >= min_move_until_t)
+                )
             ):
                 _enter_engage_phase()
             elif phase == "engage" and (
                 enemy is None or enemy.distance > engage_distance or need_ally_tether or now_t >= phase_end_t
             ):
-                if phase == "engage" and hold_engage_threat and now_t >= phase_end_t:
-                    phase_end_t = now_t + 1.5
+                if (
+                    phase == "engage"
+                    and hold_engage_threat
+                    and now_t >= phase_end_t
+                    and (now_t - engage_start_t) < max_engage_hold_s
+                ):
+                    phase_end_t = min(now_t + 1.5, engage_start_t + max_engage_hold_s)
                 else:
                     _set_aim(False)
                     phase = "move"
@@ -1463,7 +1483,7 @@ class ActionRunner:
         suppressive_max_bearing: float = 0.12,
         aim_settle_s: float = 0.18,
         recoil_comp_dy: int = 1,
-        exposed_duck_drop_threshold: float = 0.12,
+        exposed_duck_drop_threshold: float = 0.05,
         flank_recovery_min_health: float = 0.55,
         max_unclamp_attempts: int = 1,
         scan_pattern: Sequence[tuple[int, int]] = DEFAULT_RETICLE_SWEEP,
