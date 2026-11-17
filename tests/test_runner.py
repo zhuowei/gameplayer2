@@ -589,7 +589,7 @@ def test_cover_peek_combat_applies_downward_recoil_compensation(tmp_path) -> Non
     logger = TelemetryLogger(tmp_path / "t.jsonl")
     ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
 
-    # Recoil compensation applies recoil_comp_dy * bursts on BOTH suppressive (bursts=2 -> +8) and red_reticle (bursts=3 -> +12) bursts.
+    # Recoil compensation applies calibrated 0.75 px/round scaling on BOTH suppressive (tick 6 -> 1x=4, tick 12 -> 2x=8) and red_reticle (2x=8) bursts.
     f_neutral = _with_center_reticle(make_synthetic_minimap_frame(health_ratio=0.95, red_points=[(0.50, 0.40)]), (245, 245, 245))
     runner_sup = ActionRunner(ctrl, ReplayWindowBackend(lambda idx: f_neutral), ScriptedHudOCR(lambda idx: {}), logger, clock, clock.sleep)
     res_sup = runner_sup.cover_peek_combat(
@@ -601,7 +601,7 @@ def test_cover_peek_combat_applies_downward_recoil_compensation(tmp_path) -> Non
         config=LoopConfig(max_duration_s=4.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
     )
     assert res_sup.stop_reason == "suppressive_shots_done"
-    assert [ev[1] for ev in backend.events if ev[0] == "mouse_delta"] == [(0, 8, ["right"]), (0, 8, ["right"])]
+    assert [ev[1] for ev in backend.events if ev[0] == "mouse_delta"] == [(0, 4, ["right"]), (0, 8, ["right"])]
 
     clock2 = FakeClock()
     backend2 = RecordingInputBackend()
@@ -618,7 +618,7 @@ def test_cover_peek_combat_applies_downward_recoil_compensation(tmp_path) -> Non
         config=LoopConfig(max_duration_s=4.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
     )
     assert res_red.stop_reason == "reticle_shots_done"
-    assert [ev[1] for ev in backend2.events if ev[0] == "mouse_delta"] == [(0, 12, ["right"]), (0, 12, ["right"])]
+    assert [ev[1] for ev in backend2.events if ev[0] == "mouse_delta"] == [(0, 8, ["right"]), (0, 8, ["right"])]
     assert backend2.currently_held_buttons == set()
 
 
@@ -1002,7 +1002,7 @@ def test_ads_fine_steering_handles_small_bearing_and_calibrated_recoil_default(t
     backend = RecordingInputBackend()
     ctrl = InputController(backend=backend, logger=TelemetryLogger(tmp_path / "t.jsonl"), clock=clock, sleep_fn=clock.sleep, register_signals=False)
 
-    # Bearing ~0.05 produces fine dx steering and calibrated downward recoil comp (+2 * 2 bursts = +4 per suppressive shot -> +8 for 2 shots).
+    # Bearing ~0.05 produces fine dx steering and calibrated 0.75 px/round downward recoil comp (+1 + +2 = +3 for 2 suppressive shots).
     f_slight_right = _with_center_reticle(make_synthetic_minimap_frame(health_ratio=0.95, red_points=[(0.535, 0.45)]), (245, 245, 245))
     runner = ActionRunner(ctrl, ReplayWindowBackend(lambda idx: f_slight_right), ScriptedHudOCR(lambda idx: {}), TelemetryLogger(tmp_path / "t.jsonl"), clock, clock.sleep)
     res = runner.cover_peek_combat(
@@ -1017,9 +1017,9 @@ def test_ads_fine_steering_handles_small_bearing_and_calibrated_recoil_default(t
     dys = [ev[1][1] for ev in backend.events if ev[0] == "mouse_delta"]
     assert any(dx > 0 for dx in dxs)
     assert sum(dxs) >= 6
-    assert sum(dys) == 8
+    assert sum(dys) == 3
 
-    # On red_reticle bursts (3 rounds per shot), default recoil_comp_dy=2 applies +6 dy per shot (+12 for 2 shots), while explicit recoil_comp_dy=0 produces 0.
+    # On red_reticle bursts (3 rounds per shot), default recoil_comp_dy=1 applies +2 dy per shot (+4 for 2 shots), while explicit recoil_comp_dy=0 produces 0.
     f_red = _with_center_reticle(make_synthetic_minimap_frame(health_ratio=0.95, red_points=[(0.50, 0.45)]), (245, 30, 30))
     clock_def = FakeClock()
     backend_def = RecordingInputBackend()
@@ -1033,7 +1033,7 @@ def test_ads_fine_steering_handles_small_bearing_and_calibrated_recoil_default(t
         config=LoopConfig(max_duration_s=3.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
     )
     assert res_def.stop_reason == "reticle_shots_done"
-    assert sum(ev[1][1] for ev in backend_def.events if ev[0] == "mouse_delta") == 12
+    assert sum(ev[1][1] for ev in backend_def.events if ev[0] == "mouse_delta") == 4
 
     # Explicit recoil_comp_dy=0 produces 0 net dy drift.
     clock2 = FakeClock()
@@ -1724,5 +1724,124 @@ def test_aim_until_red_reticle_applies_calibrated_recoil_and_recenter_settle(tmp
         config=LoopConfig(max_duration_s=2.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
     )
     assert res.stop_reason == "reticle_shot"
-    assert [ev[1] for ev in backend.events if ev[0] == "mouse_delta"] == [(0, 4, ["right"])]
+    assert [ev[1] for ev in backend.events if ev[0] == "mouse_delta"] == [(0, 1, ["right"])]
     assert backend.currently_held_buttons == set()
+
+
+def test_cover_peek_combat_breaks_zero_red_concrete_wall_suppressive_loop(tmp_path) -> None:
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    log_path = tmp_path / "t_wall.jsonl"
+    logger = TelemetryLogger(log_path)
+    ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
+
+    # White reticle dot IS visible on concrete wall (is_visible=True), so 0 red_reticle hits across 6 suppressive bursts must trigger cover_edge_shift ('zero_red_suppressive') and eventually abort 'cover_blocked' instead of shooting concrete for 45s.
+    f_wall = _with_center_reticle(make_synthetic_minimap_frame(health_ratio=0.95, red_points=[(0.50, 0.40)]), (224, 224, 224))
+    runner = ActionRunner(ctrl, ReplayWindowBackend(lambda idx: f_wall), ScriptedHudOCR(lambda idx: {}), logger, clock, clock.sleep)
+    res = runner.cover_peek_combat(
+        enter_cover=False,
+        use_special=False,
+        aim_settle_s=0.0,
+        peek_burst_s=30.0,
+        scan_pattern=(),
+        config=LoopConfig(max_duration_s=35.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert res.stop_reason == "cover_blocked"
+    logs = read_telemetry(log_path, tool="runner")
+    shifts = [r for r in logs if r.get("action") == "cover_edge_shift"]
+    assert len(shifts) == 2
+    assert all(s["details"]["reason"] == "zero_red_suppressive" for s in shifts)
+    assert any(r.get("action") == "cover_blocked" and r["details"].get("reason") == "zero_red_suppressive" for r in logs)
+    assert backend.currently_held_keys == set()
+    assert backend.currently_held_buttons == set()
+
+
+def test_advance_under_fire_extends_recover_while_healing_and_avoids_blind_flank_yaw(tmp_path) -> None:
+    # 1) When safely healing in cover (0.38 -> 0.43 < 0.45), recover extends past recover_wait_s=0.6s (+1.5s) instead of standing up mid-heal.
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    log_path = tmp_path / "t_ext_heal.jsonl"
+    logger = TelemetryLogger(log_path)
+    ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
+    f_low = make_synthetic_minimap_frame(health_ratio=0.38, red_points=[(0.50, 0.40)])
+    f_healing = make_synthetic_minimap_frame(health_ratio=0.43, red_points=[(0.50, 0.40)])
+    runner = ActionRunner(
+        ctrl,
+        ReplayWindowBackend(lambda idx: f_low if idx == 0 else f_healing),
+        ScriptedHudOCR(lambda idx: {}),
+        logger,
+        clock,
+        clock.sleep,
+    )
+    runner.advance_under_fire(
+        recover_wait_s=0.6,
+        config=LoopConfig(max_duration_s=1.4, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    # Because health improved from 0.38 -> 0.43 (< 0.45), recover stays crouched through 1.4s (< 0.6 + 1.5 = 2.1s) without entering engage ('right' aim) or moving ('w').
+    assert ("mouse_down", "right") not in backend.events
+    assert ("key_down", "w") not in backend.events
+    assert backend.currently_held_keys == set()
+
+    # 2) Forward occluded enemy (|bearing| <= 0.30) must flank without blind +80 away-turn yaw.
+    clock2 = FakeClock()
+    backend2 = RecordingInputBackend()
+    log_path2 = tmp_path / "t_no_yaw.jsonl"
+    logger2 = TelemetryLogger(log_path2)
+    ctrl2 = InputController(backend=backend2, logger=logger2, clock=clock2, sleep_fn=clock2.sleep, register_signals=False)
+    f_ahead_occ = _with_center_reticle(
+        make_synthetic_minimap_frame(health_ratio=0.90, red_points=[(0.50, 0.62)]),
+        (224, 224, 224),
+    )
+    runner2 = ActionRunner(ctrl2, ReplayWindowBackend(lambda idx: f_ahead_occ), ScriptedHudOCR(lambda idx: {}), logger2, clock2, clock2.sleep)
+    runner2.advance_under_fire(
+        aim_settle_s=0.0,
+        move_phase_s=0.2,
+        engage_phase_s=0.5,
+        scan_pattern=(),
+        config=LoopConfig(max_duration_s=8.5, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert any(r.get("action") == "advance_flank_unblock" for r in read_telemetry(log_path2, tool="runner"))
+    assert all(ev[1][0] != 80 for ev in backend2.events if ev[0] == "mouse_delta")
+    assert backend2.currently_held_keys == set()
+    assert backend2.currently_held_buttons == set()
+
+
+def test_cover_peek_combat_timeout_at_critical_hp_returns_low_health_and_advance_aborts_close_enemy(tmp_path) -> None:
+    # 1) #255/#256: cover_peek_combat hitting timeout mid-duck at 0.124 HP finishes remaining heal sleep and returns "low_health" if still < 0.30 HP.
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    log_path = tmp_path / "t_crit_cov.jsonl"
+    logger = TelemetryLogger(log_path)
+    ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
+    f_crit = make_synthetic_minimap_frame(health_ratio=0.124, red_points=[(0.50, 0.55)])
+    runner = ActionRunner(ctrl, ReplayWindowBackend(lambda idx: f_crit), ScriptedHudOCR(lambda idx: {}), logger, clock, clock.sleep)
+    res = runner.cover_peek_combat(
+        enter_cover=False,
+        use_special=False,
+        heal_wait_s=1.0,
+        config=LoopConfig(max_duration_s=0.4, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert res.stop_reason == "low_health"
+    assert any(r.get("action") == "cover_low_health_exit" for r in read_telemetry(log_path, tool="runner"))
+    assert backend.currently_held_buttons == set()
+
+    # 2) #255: advance_under_fire entering at 0.124 HP (< 0.25) with close enemy (< 0.35) AND distant blue ally (> 0.20) immediately snaps q cover ("low_health") instead of sprinting into gunfire.
+    clock2 = FakeClock()
+    backend2 = RecordingInputBackend()
+    log_path2 = tmp_path / "t_crit_adv.jsonl"
+    logger2 = TelemetryLogger(log_path2)
+    ctrl2 = InputController(backend=backend2, logger=logger2, clock=clock2, sleep_fn=clock2.sleep, register_signals=False)
+    f_crit_close = make_synthetic_minimap_frame(
+        health_ratio=0.124,
+        blue_points=[(0.20, 0.77)],
+        red_points=[(0.50, 0.56)],  # distance ~ 0.25 (< 0.35, >= 0.18)
+    )
+    runner2 = ActionRunner(ctrl2, ReplayWindowBackend(lambda idx: f_crit_close), ScriptedHudOCR(lambda idx: {}), logger2, clock2, clock2.sleep)
+    res2 = runner2.advance_under_fire(
+        config=LoopConfig(max_duration_s=3.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert res2.stop_reason == "low_health"
+    assert res2.ticks == 1
+    assert ("key_down", "q") in backend2.events
+    assert ("key_down", "lshift") not in backend2.events
+    assert backend2.currently_held_keys == set()

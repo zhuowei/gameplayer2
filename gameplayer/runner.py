@@ -11,7 +11,7 @@ from PIL import Image
 
 from gameplayer.hud import HudObservation, OCRBackend, inspect_frame
 from gameplayer.input import InputController
-from gameplayer.minimap import MinimapObservation, inspect_minimap
+from gameplayer.minimap import MinimapObservation, RadarTarget, inspect_minimap
 from gameplayer.telemetry import TelemetryLogger, get_default_logger
 from gameplayer.window import CaptureResult, WindowBackend, WindowInfo, capture_game_window, find_game_window
 
@@ -635,9 +635,9 @@ class ActionRunner:
         min_engage_health: float = 0.25,
         recover_health: float = 0.42,
         recover_target_health: float = 0.45,
-        recover_wait_s: float = 2.5,
+        recover_wait_s: float = 4.0,
         use_special: bool = True,
-        recoil_comp_dy: int = 2,
+        recoil_comp_dy: int = 1,
         aim_settle_s: float = 0.15,
         exposed_recover_drop_threshold: float = 0.04,
         steer_gain: float = 160.0,
@@ -852,7 +852,7 @@ class ActionRunner:
                 _set_aim(False)
                 _set_movement(False)
                 if mm.health_ratio < 0.25:
-                    if can_retreat_to_ally and now_t >= recover_cooldown_until_t:
+                    if can_retreat_to_ally and (enemy is None or enemy.distance >= 0.35) and now_t >= recover_cooldown_until_t:
                         _resume_move_from_recover(tether=True, cooldown_s=1.5)
                         self._logger.log(
                             tool="runner",
@@ -911,7 +911,7 @@ class ActionRunner:
                 critical_hp = mm.minimap_visible and mm.health_ratio < 0.25
                 if exposed_drop or critical_hp:
                     if critical_hp:
-                        if can_retreat_to_ally:
+                        if can_retreat_to_ally and (enemy is None or enemy.distance >= 0.35):
                             _resume_move_from_recover(tether=True, cooldown_s=1.5)
                             self._logger.log(
                                 tool="runner",
@@ -937,7 +937,14 @@ class ActionRunner:
                         else:
                             _resume_move_from_recover(cooldown_s=1.5)
                 if phase == "recover":
-                    if now_t < phase_end_t and (not mm.minimap_visible or mm.health_ratio < recover_target_health):
+                    actively_healing = (
+                        mm.minimap_visible
+                        and mm.health_ratio < recover_target_health
+                        and recover_start_health is not None
+                        and mm.health_ratio > recover_start_health
+                    )
+                    max_heal_until_t = phase_end_t + 1.5 if actively_healing else phase_end_t
+                    if now_t < max_heal_until_t and (not mm.minimap_visible or mm.health_ratio < recover_target_health):
                         return None
                     _resume_move_from_recover()
 
@@ -1028,12 +1035,13 @@ class ActionRunner:
                             self.input.key_up("s")
                         self.input.key_down(flank_key)
                         try:
-                            self._sleep_chunked(0.70)
+                            self._sleep_chunked(0.55)
                         finally:
                             self.input.key_up(flank_key)
-                        self._steer_camera(-80 if flank_key == "a" else 80, 0)
+                        if abs(enemy.bearing) > 0.30:
+                            self._steer_camera(-45 if flank_key == "a" else 45, 0)
                         flank_move_s = min(move_phase_s, 0.65)
-                        flank_unblock_until_t = now_t + 0.90 + flank_move_s
+                        flank_unblock_until_t = now_t + 0.75 + flank_move_s
                         phase = "move"
                         phase_end_t = flank_unblock_until_t
                         min_move_until_t = flank_unblock_until_t
@@ -1057,7 +1065,7 @@ class ActionRunner:
                     blocked_flank_streak = 0
                     self._fire_bursts("left", bursts=3, hold_s=0.03, gap_s=0.025, reason="red_reticle")
                     if recoil_comp_dy > 0:
-                        self.input.mouse_delta(0, int(recoil_comp_dy) * 3, steps=1, duration_s=0.01)
+                        self.input.mouse_delta(0, int(recoil_comp_dy) * 2, steps=1, duration_s=0.01)
                     return None
 
                 if enemy is not None:
@@ -1076,7 +1084,8 @@ class ActionRunner:
                         if no_lock_ticks in (6, 12):
                             self._fire_bursts("left", bursts=2, hold_s=0.03, gap_s=0.03, reason="suppressive")
                             if recoil_comp_dy > 0:
-                                self.input.mouse_delta(0, int(recoil_comp_dy) * 2, steps=1, duration_s=0.01)
+                                sup_scale = 1 if no_lock_ticks == 6 else 2
+                                self.input.mouse_delta(0, int(recoil_comp_dy) * sup_scale, steps=1, duration_s=0.01)
                     else:
                         aligned_ticks = 0
 
@@ -1396,7 +1405,7 @@ class ActionRunner:
         fallback_fire_interval_ticks: int = 6,
         fallback_fire_max_bearing: float = 0.08,
         reacquire_aim_interval_ticks: Optional[int] = None,
-        recoil_comp_dy: int = 2,
+        recoil_comp_dy: int = 1,
         cover_on_health_drop: bool = False,
         config: Optional[LoopConfig] = None,
     ) -> LoopResult:
@@ -1429,7 +1438,7 @@ class ActionRunner:
                     fire_bursts = max(1, bursts)
                     self._fire_bursts(fire_button, bursts=bursts, hold_s=0.03, gap_s=0.03)
                     if recoil_comp_dy > 0:
-                        self.input.mouse_delta(0, int(recoil_comp_dy) * fire_bursts, steps=1, duration_s=0.01)
+                        self.input.mouse_delta(0, int(recoil_comp_dy) * max(1, fire_bursts - 1), steps=1, duration_s=0.01)
                     shots_fired += 1
                     if stop_on_shot or shots_fired >= max_shots:
                         return "reticle_shot"
@@ -1478,7 +1487,7 @@ class ActionRunner:
                     fire_bursts = max(1, bursts)
                     self._fire_bursts(fire_button, bursts=fire_bursts, hold_s=0.03, gap_s=0.03)
                     if recoil_comp_dy > 0:
-                        self.input.mouse_delta(0, int(recoil_comp_dy) * fire_bursts, steps=1, duration_s=0.01)
+                        self.input.mouse_delta(0, int(recoil_comp_dy) * max(1, fire_bursts - 1), steps=1, duration_s=0.01)
                     shots_fired += 1
                     if shots_fired >= max_shots:
                         return "suppressive_shots_done"
@@ -1591,7 +1600,7 @@ class ActionRunner:
         bearing_deadband: float = 0.025,
         suppressive_max_bearing: float = 0.12,
         aim_settle_s: float = 0.18,
-        recoil_comp_dy: int = 2,
+        recoil_comp_dy: int = 1,
         exposed_duck_drop_threshold: float = 0.05,
         flank_recovery_min_health: float = 0.55,
         max_unclamp_attempts: int = 1,
@@ -1653,6 +1662,7 @@ class ActionRunner:
         last_clamped_bearing: Optional[float] = None
         no_reticle_ticks = 0
         edge_shift_attempts = 0
+        suppressive_no_red_count = 0
 
         def _recenter_sweep() -> None:
             nonlocal sweep_idx, sweep_offset_x, sweep_offset_y
@@ -1678,8 +1688,49 @@ class ActionRunner:
                 is_peeking = False
                 no_reticle_ticks = 0
 
+        def _handle_blocked_cover(now_t: float, enemy: RadarTarget, block_reason: str) -> Optional[str]:
+            nonlocal edge_shift_attempts, no_reticle_ticks, no_lock_ticks, aligned_ticks, suppressive_no_red_count, toggled_cover_for_flank
+            if edge_shift_attempts >= 2:
+                self._logger.log(
+                    tool="runner",
+                    action="cover_blocked",
+                    status="ok",
+                    details={
+                        "edge_shift_attempts": edge_shift_attempts,
+                        "bearing": round(enemy.bearing, 3),
+                        "reason": block_reason,
+                    },
+                )
+                _set_peek(False, now_t)
+                if toggled_cover_for_flank:
+                    self._tap_key_preserving_held("q", hold_s=0.08)
+                    toggled_cover_for_flank = False
+                return "cover_blocked"
+            edge_shift_attempts += 1
+            preferred_key = "a" if enemy.bearing < 0 else "d"
+            sidestep_key = preferred_key if edge_shift_attempts == 1 else ("d" if preferred_key == "a" else "a")
+            _set_peek(False, now_t)
+            self._tap_key_preserving_held(sidestep_key, hold_s=0.30)
+            no_reticle_ticks = 0
+            no_lock_ticks = 0
+            aligned_ticks = 0
+            suppressive_no_red_count = 0
+            self._logger.log(
+                tool="runner",
+                action="cover_edge_shift",
+                status="ok",
+                details={
+                    "attempt": edge_shift_attempts,
+                    "sidestep_key": sidestep_key,
+                    "bearing": round(enemy.bearing, 3),
+                    "reason": block_reason,
+                },
+            )
+            _set_peek(True, now_t)
+            return None
+
         def _on_tick(state: FrameState) -> Optional[str]:
-            nonlocal special_triggered, duck_until_t, duck_logged, duck_reason_heal, duck_start_health, peak_health, sweep_idx, sweep_offset_x, sweep_offset_y, shots_fired, no_enemy_ticks, no_enemy_since_t, aligned_ticks, target_idx, no_lock_ticks, steer_cadence_ticks, large_steer_ticks, clamped_ticks, unclamp_attempts, flank_stage2_done, toggled_cover_for_flank, pre_flank_bearing, last_clamped_bearing, no_reticle_ticks, edge_shift_attempts
+            nonlocal special_triggered, duck_until_t, duck_logged, duck_reason_heal, duck_start_health, peak_health, sweep_idx, sweep_offset_x, sweep_offset_y, shots_fired, no_enemy_ticks, no_enemy_since_t, aligned_ticks, target_idx, no_lock_ticks, steer_cadence_ticks, large_steer_ticks, clamped_ticks, unclamp_attempts, flank_stage2_done, toggled_cover_for_flank, pre_flank_bearing, last_clamped_bearing, no_reticle_ticks, edge_shift_attempts, suppressive_no_red_count
             mm = state.minimap
             now_t = state.elapsed_s
 
@@ -1751,6 +1802,7 @@ class ActionRunner:
                 no_enemy_since_t = None
                 no_reticle_ticks = 0
                 edge_shift_attempts = 0
+                suppressive_no_red_count = 0
                 aligned_ticks = 0
                 no_lock_ticks = 0
                 steer_cadence_ticks = 0
@@ -1759,7 +1811,7 @@ class ActionRunner:
                 last_clamped_bearing = None
                 self._fire_bursts(fire_button, bursts=3, hold_s=0.03, gap_s=0.025, reason="red_reticle")
                 if recoil_comp_dy > 0:
-                    self.input.mouse_delta(0, int(recoil_comp_dy) * 3, steps=1, duration_s=0.01)
+                    self.input.mouse_delta(0, int(recoil_comp_dy) * 2, steps=1, duration_s=0.01)
                 shots_fired += 1
                 if max_shots is not None and shots_fired >= max_shots:
                     _recenter_sweep()
@@ -1792,41 +1844,8 @@ class ActionRunner:
                 else:
                     no_reticle_ticks += 1
                     if no_reticle_ticks >= 6:
-                        if edge_shift_attempts >= 2:
-                            self._logger.log(
-                                tool="runner",
-                                action="cover_blocked",
-                                status="ok",
-                                details={
-                                    "edge_shift_attempts": edge_shift_attempts,
-                                    "bearing": round(enemy.bearing, 3),
-                                },
-                            )
-                            _set_peek(False, now_t)
-                            if toggled_cover_for_flank:
-                                self._tap_key_preserving_held("q", hold_s=0.08)
-                                toggled_cover_for_flank = False
-                            return "cover_blocked"
-                        edge_shift_attempts += 1
-                        preferred_key = "a" if enemy.bearing < 0 else "d"
-                        sidestep_key = preferred_key if edge_shift_attempts == 1 else ("d" if preferred_key == "a" else "a")
-                        _set_peek(False, now_t)
-                        self._tap_key_preserving_held(sidestep_key, hold_s=0.30)
-                        no_reticle_ticks = 0
-                        no_lock_ticks = 0
-                        aligned_ticks = 0
-                        self._logger.log(
-                            tool="runner",
-                            action="cover_edge_shift",
-                            status="ok",
-                            details={
-                                "attempt": edge_shift_attempts,
-                                "sidestep_key": sidestep_key,
-                                "bearing": round(enemy.bearing, 3),
-                            },
-                        )
-                        _set_peek(True, now_t)
-                        return None
+                        res = _handle_blocked_cover(now_t, enemy, "no_reticle")
+                        return res
 
                 # Flanking / cover-clamped enemy (> 0.45): 2-stage recovery (free-look+sidestep, then q cover-break + aim turn) if healthy.
                 if abs(enemy.bearing) > 0.45:
@@ -1954,11 +1973,15 @@ class ActionRunner:
                         if no_lock_ticks in (6, 12):
                             self._fire_bursts(fire_button, bursts=2, hold_s=0.03, gap_s=0.03, reason="suppressive")
                             if recoil_comp_dy > 0:
-                                self.input.mouse_delta(0, int(recoil_comp_dy) * 2, steps=1, duration_s=0.01)
+                                sup_scale = 1 if no_lock_ticks == 6 else 2
+                                self.input.mouse_delta(0, int(recoil_comp_dy) * sup_scale, steps=1, duration_s=0.01)
                             shots_fired += 1
+                            suppressive_no_red_count += 1
                             if max_shots is not None and shots_fired >= max_shots:
                                 _recenter_sweep()
                                 return "suppressive_shots_done"
+                            if suppressive_no_red_count >= 6:
+                                return _handle_blocked_cover(now_t, enemy, "zero_red_suppressive")
                     else:
                         aligned_ticks = 0
                 else:
@@ -1973,9 +1996,50 @@ class ActionRunner:
                     sweep_offset_y += dy
             return None
 
-        return self._run_loop(
+        res = self._run_loop(
             mode_name="cover_peek_combat",
             config=cfg,
             on_tick=_on_tick,
             on_before_release=_recenter_sweep,
         )
+        if (
+            res.stop_reason == "timeout"
+            and res.last_minimap is not None
+            and res.last_minimap.minimap_visible
+            and res.last_minimap.health_ratio < min_peek_health
+        ):
+            rem_heal_s = min(3.5, max(0.0, duck_until_t - res.elapsed_s))
+            if rem_heal_s > 0:
+                self._sleep_chunked(rem_heal_s)
+                cap = capture_game_window(
+                    backend=self._window_backend,
+                    logger=self._logger,
+                    require_16_9=True,
+                )
+                mm_after = inspect_minimap(cap.image, logger=self._logger)
+                res = LoopResult(
+                    stop_reason=res.stop_reason,
+                    ticks=res.ticks,
+                    elapsed_s=res.elapsed_s + rem_heal_s,
+                    banner=res.banner,
+                    last_hud=res.last_hud,
+                    last_minimap=mm_after,
+                    actions_sent=res.actions_sent,
+                )
+            if res.last_minimap is not None and res.last_minimap.minimap_visible and res.last_minimap.health_ratio < 0.30:
+                self._logger.log(
+                    tool="runner",
+                    action="cover_low_health_exit",
+                    status="ok",
+                    details={"health_ratio": round(res.last_minimap.health_ratio, 3)},
+                )
+                res = LoopResult(
+                    stop_reason="low_health",
+                    ticks=res.ticks,
+                    elapsed_s=res.elapsed_s,
+                    banner=res.banner,
+                    last_hud=res.last_hud,
+                    last_minimap=res.last_minimap,
+                    actions_sent=res.actions_sent,
+                )
+        return res
