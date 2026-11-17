@@ -110,3 +110,28 @@ Designed for `watcher` to continuously record clean, downscaled 16:9 game window
 - Encodes to `.in_progress_seg_*.mp4` and atomically renames to `seg_*.mp4` only after `ffmpeg` closes cleanly (`+faststart`), so readers never see truncated MP4 files.
 - Automatically prunes oldest segments beyond `--max-segments` (default `10`, ~30 minutes rolling window).
 - Skips transient `WindowNotFoundError` / `WindowCaptureError` frames cleanly and reports status in `logs/capture_daemon.json`.
+
+---
+
+## 5. HUD Region Cropping & Vision OCR (`gameplayer.hud`)
+
+Offline 16:9 HUD region extractor and native macOS Vision OCR (`VNRecognizeTextRequest`, fast level) for extracting:
+- `top_left_help`: tutorial/help prompt box
+- `top_right_status`: character, time, wanted/cash/weapon status area
+- `center_banner`: classifies `WASTED`, `BUSTED`, `MISSION_FAILED`, and `MISSION_PASSED`
+- `bottom_subtitle`: bottom subtitle and mission objective bar
+
+### CLI Usage
+
+```bash
+# Inspect any saved 16:9 PNG offline (never touches live game window)
+.venv/bin/python -m gameplayer.hud --inspect-frame captures/start.png
+.venv/bin/python -m gameplayer.hud --inspect-frame captures/start.png --save-crops tmp/crops
+```
+
+### Python API
+
+- `inspect_frame(image_or_path, ocr_backend=None, logger=None) -> HudObservation`
+- `crop_hud_regions(image, regions=HUD_REGIONS)`
+- `classify_center_banner(lines) -> Optional[str]`
+- `VisionOCRBackend()` (macOS Vision) or custom `OCRBackend` for offline tests.
