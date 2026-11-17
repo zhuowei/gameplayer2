@@ -1127,3 +1127,51 @@ def test_reticle_sweep_finer_horizontal_step_and_reduced_suppressive_cadence(tmp
     assert 1 <= len(suppressive_logs) <= 2
     assert backend.currently_held_keys == set()
     assert backend.currently_held_buttons == set()
+
+
+def test_advance_under_fire_covers_on_timeout_and_backpedals_into_engage_and_aborts_critical_hp(tmp_path) -> None:
+    # 1) Timeout while standing/engaging taps q once (`advance_timeout_cover`), while timeout inside recover does NOT tap q again.
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    log_path = tmp_path / "t_to1.jsonl"
+    logger = TelemetryLogger(log_path)
+    ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
+    f_open = make_synthetic_minimap_frame(health_ratio=0.80, yellow_points=[(0.50, 0.25)])
+    runner = ActionRunner(ctrl, ReplayWindowBackend(lambda idx: f_open), ScriptedHudOCR(lambda idx: {}), logger, clock, clock.sleep)
+    res = runner.advance_under_fire(
+        config=LoopConfig(max_duration_s=0.3, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert res.stop_reason == "timeout"
+    assert ("key_down", "q") in backend.events
+    assert any(r.get("action") == "advance_timeout_cover" for r in read_telemetry(log_path, tool="runner"))
+    assert backend.currently_held_keys == set()
+
+    clock2 = FakeClock()
+    backend2 = RecordingInputBackend()
+    log_path2 = tmp_path / "t_to2.jsonl"
+    logger2 = TelemetryLogger(log_path2)
+    ctrl2 = InputController(backend=backend2, logger=logger2, clock=clock2, sleep_fn=clock2.sleep, register_signals=False)
+    f_in_rec = make_synthetic_minimap_frame(health_ratio=0.40, yellow_points=[(0.50, 0.25)])
+    runner2 = ActionRunner(ctrl2, ReplayWindowBackend(lambda idx: f_in_rec), ScriptedHudOCR(lambda idx: {}), logger2, clock2, clock2.sleep)
+    res2 = runner2.advance_under_fire(
+        recover_wait_s=2.5,
+        config=LoopConfig(max_duration_s=0.4, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert res2.stop_reason == "timeout"
+    assert backend2.events.count(("key_down", "q")) == 1
+    assert not any(r.get("action") == "advance_timeout_cover" for r in read_telemetry(log_path2, tool="runner"))
+
+    # 2) Critical < 0.25 HP with no distant ally aborts immediately without entering recover.
+    clock3 = FakeClock()
+    backend3 = RecordingInputBackend()
+    log_path3 = tmp_path / "t_crit.jsonl"
+    logger3 = TelemetryLogger(log_path3)
+    ctrl3 = InputController(backend=backend3, logger=logger3, clock=clock3, sleep_fn=clock3.sleep, register_signals=False)
+    f_crit = make_synthetic_minimap_frame(health_ratio=0.17, yellow_points=[(0.50, 0.25)])
+    runner3 = ActionRunner(ctrl3, ReplayWindowBackend(lambda idx: f_crit), ScriptedHudOCR(lambda idx: {}), logger3, clock3, clock3.sleep)
+    res3 = runner3.advance_under_fire(
+        config=LoopConfig(max_duration_s=2.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert res3.stop_reason == "low_health"
+    assert not any(r.get("action") == "advance_recover" for r in read_telemetry(log_path3, tool="runner"))
+    assert backend3.currently_held_keys == set()

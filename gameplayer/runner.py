@@ -584,6 +584,7 @@ class ActionRunner:
         stuck_motion_threshold: float = 2.5,
         unstuck_duration_s: float = 0.55,
         vault_on_stuck: bool = True,
+        cover_on_timeout: bool = True,
         scan_pattern: Sequence[tuple[int, int]] = DEFAULT_RETICLE_SWEEP,
         config: Optional[LoopConfig] = None,
     ) -> LoopResult:
@@ -710,6 +711,22 @@ class ActionRunner:
                 recover_start_health = None
                 _reset_motion_tracker()
 
+            def _enter_engage_phase(*, cooldown_s: float = 0.0) -> None:
+                nonlocal phase, phase_end_t, aligned_ticks, sweep_idx, sweep_offset_x, sweep_offset_y
+                nonlocal recover_cooldown_until_t, recover_start_health
+                _set_movement(False)
+                phase = "engage"
+                phase_end_t = now_t + engage_phase_s
+                aligned_ticks = 0
+                sweep_idx = 0
+                sweep_offset_x = 0
+                sweep_offset_y = 0
+                if cooldown_s > 0.0:
+                    recover_cooldown_until_t = now_t + cooldown_s
+                recover_start_health = None
+                _reset_motion_tracker()
+                _set_aim(True)
+
             # Low-health cover/recover phase
             if (
                 phase != "recover"
@@ -719,6 +736,14 @@ class ActionRunner:
             ):
                 _set_aim(False)
                 _set_movement(False)
+                if mm.health_ratio < 0.25 and (blue_ally is None or blue_ally.distance <= 0.14):
+                    self._logger.log(
+                        tool="runner",
+                        action="advance_exposed",
+                        status="ok",
+                        details={"health_ratio": round(mm.health_ratio, 3)},
+                    )
+                    return "low_health"
                 if (
                     enemy is not None
                     and enemy.distance < 0.45
@@ -753,11 +778,13 @@ class ActionRunner:
                     return None
 
             if phase == "recover":
-                if (
+                exposed_drop = (
                     mm.minimap_visible
                     and recover_start_health is not None
                     and (recover_start_health - mm.health_ratio) >= exposed_recover_drop_threshold
-                ):
+                )
+                critical_hp = mm.minimap_visible and mm.health_ratio < 0.25
+                if exposed_drop or critical_hp:
                     if blue_ally is not None and blue_ally.distance > 0.14:
                         _resume_move_from_recover(tether=True, cooldown_s=1.5)
                         self._logger.log(
@@ -766,11 +793,7 @@ class ActionRunner:
                             status="ok",
                             details={"health_ratio": round(mm.health_ratio, 3), "ally_distance": round(blue_ally.distance, 3)},
                         )
-                    elif enemy is not None and enemy.distance < 0.45 and mm.health_ratio >= 0.25:
-                        recovery_count += 1
-                        self._perform_on_foot_backpedal(attempt=recovery_count, duration_s=0.4)
-                        _resume_move_from_recover(cooldown_s=1.5)
-                    elif mm.health_ratio < 0.25:
+                    elif critical_hp:
                         _set_aim(False)
                         _set_movement(False)
                         self._logger.log(
@@ -780,6 +803,13 @@ class ActionRunner:
                             details={"health_ratio": round(mm.health_ratio, 3)},
                         )
                         return "low_health"
+                    elif enemy is not None and enemy.distance < 0.45:
+                        recovery_count += 1
+                        self._perform_on_foot_backpedal(attempt=recovery_count, duration_s=0.4)
+                        if enemy.distance <= engage_distance:
+                            _enter_engage_phase(cooldown_s=2.0)
+                        else:
+                            _resume_move_from_recover(cooldown_s=1.5)
                 if phase == "recover":
                     if now_t < phase_end_t and (not mm.minimap_visible or mm.health_ratio < recover_target_health):
                         return None
@@ -818,15 +848,7 @@ class ActionRunner:
             if phase == "move" and can_engage and (
                 hold_engage_threat or (now_t >= min_move_until_t and now_t >= engage_cooldown_until_t)
             ):
-                _set_movement(False)
-                phase = "engage"
-                phase_end_t = now_t + engage_phase_s
-                aligned_ticks = 0
-                sweep_idx = 0
-                sweep_offset_x = 0
-                sweep_offset_y = 0
-                _reset_motion_tracker()
-                _set_aim(True)
+                _enter_engage_phase()
             elif phase == "engage" and (
                 enemy is None or enemy.distance > engage_distance or need_ally_tether or now_t >= phase_end_t
             ):
@@ -906,11 +928,23 @@ class ActionRunner:
                     self._steer_camera(dx, 0)
             return None
 
-        return self._run_loop(
+        result = self._run_loop(
             mode_name="advance_under_fire",
             config=cfg,
             on_tick=_on_tick,
         )
+        if cover_on_timeout and result.stop_reason == "timeout" and phase != "recover":
+            self._tap_key_preserving_held("q", hold_s=0.08)
+            self._logger.log(
+                tool="runner",
+                action="advance_timeout_cover",
+                status="ok",
+                details={
+                    "health_ratio": round(result.last_minimap.health_ratio, 3) if result.last_minimap else None,
+                    "phase": phase,
+                },
+            )
+        return result
 
     def follow_gps_drive(
         self,
