@@ -1066,7 +1066,7 @@ def test_advance_under_fire_exposed_drop_retreats_or_backpedals_above_floor(tmp_
     logger = TelemetryLogger(log_path)
     ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
     f_entry = make_synthetic_minimap_frame(
-        health_ratio=0.45,
+        health_ratio=0.40,
         yellow_points=[(0.50, 0.25)],
         blue_points=[(0.50, 0.92)],   # behind Trevor -> |bearing| > 0.35, distance > 0.14
         red_points=[(0.50, 0.62)],    # close enemy < 0.45
@@ -1081,20 +1081,20 @@ def test_advance_under_fire_exposed_drop_retreats_or_backpedals_above_floor(tmp_
     assert not any(r.get("action") == "advance_recover" for r in logs)
     assert backend.currently_held_keys == set()
 
-    # 2) Recover drop >= 0.04 (0.46 -> 0.41) with near blue ally (<= 0.14) and close enemy (< 0.45) backpedals instead of dying.
+    # 2) Recover drop >= 0.04 (0.40 -> 0.35) with near blue ally (<= 0.14) and close enemy (< 0.45) backpedals instead of dying.
     clock2 = FakeClock()
     backend2 = RecordingInputBackend()
     log_path2 = tmp_path / "t_bp.jsonl"
     logger2 = TelemetryLogger(log_path2)
     ctrl2 = InputController(backend=backend2, logger=logger2, clock=clock2, sleep_fn=clock2.sleep, register_signals=False)
     f_rec = make_synthetic_minimap_frame(
-        health_ratio=0.46,
+        health_ratio=0.40,
         yellow_points=[(0.50, 0.25)],
         blue_points=[(0.50, 0.72)],   # near Trevor -> distance <= 0.14
         red_points=[(0.50, 0.60)],    # close enemy < 0.45
     )
     f_drop = make_synthetic_minimap_frame(
-        health_ratio=0.41,            # drop = 0.05 >= 0.04, stays >= 0.25
+        health_ratio=0.35,            # drop = 0.05 >= 0.04, stays >= 0.25
         yellow_points=[(0.50, 0.25)],
         blue_points=[(0.50, 0.72)],
         red_points=[(0.50, 0.60)],
@@ -1250,3 +1250,28 @@ def test_recenter_sweep_on_timeout_prevents_sky_pitch_drift(tmp_path) -> None:
         assert sum(ev[1][1] for ev in backend.events if ev[0] == "mouse_delta") == 0
         assert backend.currently_held_keys == set()
         assert backend.currently_held_buttons == set()
+
+
+def test_advance_under_fire_avoids_passive_regen_cap_recover_loop(tmp_path) -> None:
+    # GTA 5 passive regen caps around 0.45-0.48; staying at 0.46 HP must engage & fight instead of looping advance_recover.
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    log_path = tmp_path / "t_regen_cap.jsonl"
+    logger = TelemetryLogger(log_path)
+    ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
+    f_regen_cap = _with_center_reticle(
+        make_synthetic_minimap_frame(health_ratio=0.46, red_points=[(0.50, 0.56)]),
+        (245, 30, 30),
+    )
+    runner = ActionRunner(ctrl, ReplayWindowBackend(lambda idx: f_regen_cap), ScriptedHudOCR(lambda idx: {}), logger, clock, clock.sleep)
+    runner.advance_under_fire(
+        aim_settle_s=0.0,
+        move_phase_s=0.2,
+        engage_phase_s=1.0,
+        config=LoopConfig(max_duration_s=1.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    logs = read_telemetry(log_path, tool="runner")
+    assert not any(r.get("action") == "advance_recover" for r in logs)
+    assert any(r.get("action") == "fire_burst" for r in logs)
+    assert backend.currently_held_keys == set()
+    assert backend.currently_held_buttons == set()
