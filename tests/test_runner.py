@@ -1482,17 +1482,28 @@ def test_advance_under_fire_no_backward_ally_steer_and_crossfire_lateral_reposit
     )
     assert [ev for ev in backend.events if ev[0] == "mouse_delta"] == []
 
-    # B) With >= 2 close enemies (<= 0.32) and no yellow route, max_engage_hold_s expiry sidesteps laterally (0.35s) instead of walking W 2.2s into crossfire.
+    # B1) With >= 2 close enemies (<= 0.32), no yellow route, and live red_reticle LOS (>0 hits), max_engage_hold_s expiry sidesteps laterally (0.35s) instead of walking W 2.2s into crossfire.
     clock2 = FakeClock()
     backend2 = RecordingInputBackend()
     log_path2 = tmp_path / "t_xfire.jsonl"
     logger2 = TelemetryLogger(log_path2)
     ctrl2 = InputController(backend=backend2, logger=logger2, clock=clock2, sleep_fn=clock2.sleep, register_signals=False)
-    f_xfire = make_synthetic_minimap_frame(
-        health_ratio=0.90,
-        red_points=[(0.46, 0.65), (0.54, 0.65)],  # 2 close cops <= 0.32
+    f_xfire_red = _with_center_reticle(
+        make_synthetic_minimap_frame(health_ratio=0.90, red_points=[(0.46, 0.65), (0.54, 0.65)]),
+        (245, 30, 30),
     )
-    runner2 = ActionRunner(ctrl2, ReplayWindowBackend(lambda idx: f_xfire), ScriptedHudOCR(lambda idx: {}), logger2, clock2, clock2.sleep)
+    f_xfire_occ = _with_center_reticle(
+        make_synthetic_minimap_frame(health_ratio=0.90, red_points=[(0.46, 0.65), (0.54, 0.65)]),
+        (245, 245, 245),
+    )
+    runner2 = ActionRunner(
+        ctrl2,
+        ReplayWindowBackend(lambda idx: f_xfire_red if idx == 1 else f_xfire_occ),
+        ScriptedHudOCR(lambda idx: {}),
+        logger2,
+        clock2,
+        clock2.sleep,
+    )
     runner2.advance_under_fire(
         aim_settle_s=0.0,
         move_phase_s=2.2,
@@ -1506,6 +1517,25 @@ def test_advance_under_fire_no_backward_ally_steer_and_crossfire_lateral_reposit
     assert len(sidesteps) >= 1
     assert ("key_down", "w") not in backend2.events
     assert backend2.currently_held_keys == set()
+
+    # B2) With >= 2 close enemies (<= 0.32) and 0 red_reticle locks (blocked behind truck/wall), triggers consistent-direction advance_flank_unblock + move reposition.
+    clock3 = FakeClock()
+    backend3 = RecordingInputBackend()
+    log_path3 = tmp_path / "t_flank_unblock.jsonl"
+    logger3 = TelemetryLogger(log_path3)
+    ctrl3 = InputController(backend=backend3, logger=logger3, clock=clock3, sleep_fn=clock3.sleep, register_signals=False)
+    runner3 = ActionRunner(ctrl3, ReplayWindowBackend(lambda idx: f_xfire_occ), ScriptedHudOCR(lambda idx: {}), logger3, clock3, clock3.sleep)
+    runner3.advance_under_fire(
+        aim_settle_s=0.0,
+        move_phase_s=2.2,
+        engage_phase_s=1.0,
+        config=LoopConfig(max_duration_s=8.5, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    flanks = [r for r in read_telemetry(log_path3, tool="runner") if r.get("action") == "advance_flank_unblock"]
+    assert len(flanks) >= 1
+    assert flanks[0]["details"]["flank_key"] == "d"
+    assert ("key_down", "w") in backend3.events
+    assert backend3.currently_held_keys == set()
 
 
 def test_on_foot_sidestep_releases_w_backs_off_and_alternates_after_attempt_3(tmp_path) -> None:

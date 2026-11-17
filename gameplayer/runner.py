@@ -281,7 +281,8 @@ class ActionRunner:
 
                         def _meaningful_hud_text(text: str) -> str:
                             cleaned = text.strip()
-                            if len(cleaned) >= 4 and sum(1 for ch in cleaned if ch.isalnum()) >= 3:
+                            words = [w for w in cleaned.split() if any(ch.isalpha() for ch in w)]
+                            if len(cleaned) >= 6 and len(words) >= 2 and sum(1 for ch in cleaned if ch.isalnum()) >= 5:
                                 return cleaned
                             return ""
 
@@ -658,6 +659,7 @@ class ActionRunner:
         min_move_until_t = 0.0
         engage_cooldown_until_t = 0.0
         engage_start_t = 0.0
+        flank_unblock_until_t = 0.0
         recover_cooldown_until_t = 0.0
         tether_active_until_t = 0.0
         recover_start_health: Optional[float] = None
@@ -676,6 +678,8 @@ class ActionRunner:
         aligned_ticks = 0
         target_idx = 0
         no_lock_ticks = 0
+        engage_red_hits = 0
+        blocked_flank_streak = 0
 
         def _set_key(key: str, want_down: bool) -> None:
             is_down = key in self.input.held_keys
@@ -713,7 +717,7 @@ class ActionRunner:
                 self.input.mouse_up("right")
 
         def _on_tick(state: FrameState) -> Optional[str]:
-            nonlocal phase, phase_end_t, min_move_until_t, engage_cooldown_until_t, engage_start_t, recover_cooldown_until_t, tether_active_until_t, recover_start_health, retreat_start_health, special_triggered, prev_gray, last_motion_check_t, low_motion_elapsed_s, last_bearing, recovery_count, sweep_idx, sweep_offset_x, sweep_offset_y, aligned_ticks, target_idx, no_lock_ticks
+            nonlocal phase, phase_end_t, min_move_until_t, engage_cooldown_until_t, engage_start_t, flank_unblock_until_t, recover_cooldown_until_t, tether_active_until_t, recover_start_health, retreat_start_health, special_triggered, prev_gray, last_motion_check_t, low_motion_elapsed_s, last_bearing, recovery_count, sweep_idx, sweep_offset_x, sweep_offset_y, aligned_ticks, target_idx, no_lock_ticks, engage_red_hits, blocked_flank_streak
             now_t = state.elapsed_s
             mm = state.minimap
 
@@ -764,7 +768,7 @@ class ActionRunner:
                 _reset_motion_tracker()
 
             def _enter_engage_phase(*, cooldown_s: float = 0.0) -> None:
-                nonlocal phase, phase_end_t, engage_start_t, aligned_ticks, no_lock_ticks, sweep_idx, sweep_offset_x, sweep_offset_y
+                nonlocal phase, phase_end_t, engage_start_t, aligned_ticks, no_lock_ticks, engage_red_hits, sweep_idx, sweep_offset_x, sweep_offset_y
                 nonlocal recover_cooldown_until_t, recover_start_health
                 _set_movement(False)
                 phase = "engage"
@@ -772,6 +776,7 @@ class ActionRunner:
                 phase_end_t = now_t + engage_phase_s
                 aligned_ticks = 0
                 no_lock_ticks = 0
+                engage_red_hits = 0
                 sweep_idx = 0
                 sweep_offset_x = 0
                 sweep_offset_y = 0
@@ -946,7 +951,7 @@ class ActionRunner:
 
             max_engage_hold_s = max(engage_phase_s * 2.0, 6.5)
             if phase == "move" and can_engage and (
-                point_blank_enemy
+                (point_blank_enemy and now_t >= flank_unblock_until_t)
                 or (
                     now_t >= engage_cooldown_until_t
                     and (hold_engage_threat or now_t >= min_move_until_t)
@@ -973,11 +978,35 @@ class ActionRunner:
                         and enemy is not None
                         and enemy.distance <= 0.32
                     ):
-                        recovery_count += 1
                         target_idx += 1
                         no_lock_ticks = 0
-                        self._perform_on_foot_sidestep(recovery_count, enemy.bearing, 0.35, False)
-                        _enter_engage_phase()
+                        if engage_red_hits > 0:
+                            blocked_flank_streak = 0
+                            recovery_count += 1
+                            self._perform_on_foot_sidestep(recovery_count, enemy.bearing, 0.35, False)
+                            _enter_engage_phase()
+                            return None
+                        # Zero red_reticle locks across engage window (e.g. blocked behind Bobcat truck/wall): flank consistently around obstacle.
+                        blocked_flank_streak += 1
+                        flank_key = "d" if ((blocked_flank_streak - 1) // 2) % 2 == 0 else "a"
+                        self._logger.log(
+                            tool="runner",
+                            action="advance_flank_unblock",
+                            status="ok",
+                            details={"streak": blocked_flank_streak, "flank_key": flank_key, "enemy_distance": round(enemy.distance, 3)},
+                        )
+                        self.input.key_down(flank_key)
+                        try:
+                            self._sleep_chunked(0.55)
+                        finally:
+                            self.input.key_up(flank_key)
+                        flank_move_s = min(move_phase_s, 1.0)
+                        flank_unblock_until_t = now_t + 0.55 + flank_move_s
+                        phase = "move"
+                        phase_end_t = flank_unblock_until_t
+                        min_move_until_t = flank_unblock_until_t
+                        engage_cooldown_until_t = flank_unblock_until_t
+                        _reset_motion_tracker()
                         return None
                     phase = "move"
                     phase_end_t = now_t + move_phase_s
@@ -992,6 +1021,8 @@ class ActionRunner:
                 if reticle.is_red:
                     aligned_ticks = 0
                     no_lock_ticks = 0
+                    engage_red_hits += 1
+                    blocked_flank_streak = 0
                     self._fire_bursts("left", bursts=3, hold_s=0.03, gap_s=0.025, reason="red_reticle")
                     if recoil_comp_dy > 0:
                         self.input.mouse_delta(0, int(recoil_comp_dy), steps=1, duration_s=0.01)
