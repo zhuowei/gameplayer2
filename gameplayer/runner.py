@@ -551,15 +551,29 @@ class ActionRunner:
             if repress_aim and release_aim_button:
                 self.input.mouse_down(release_aim_button)
 
-    def _fire_bursts(self, fire_button: str, bursts: int = 1, hold_s: float = 0.03, gap_s: float = 0.03) -> None:
-        for idx in range(max(1, bursts)):
+    def _fire_bursts(
+        self,
+        fire_button: str,
+        bursts: int = 1,
+        hold_s: float = 0.03,
+        gap_s: float = 0.03,
+        reason: Optional[str] = None,
+    ) -> None:
+        count = max(1, bursts)
+        for idx in range(count):
             self.input.mouse_down(fire_button)
             try:
                 self._sleep(hold_s)
             finally:
                 self.input.mouse_up(fire_button)
-            if idx + 1 < bursts and gap_s > 0:
+            if idx + 1 < count and gap_s > 0:
                 self._sleep(gap_s)
+        self._logger.log(
+            tool="runner",
+            action="fire_burst",
+            status="ok",
+            details={"button": fire_button, "bursts": count, "reason": reason or "burst"},
+        )
 
     def switch_character(
         self,
@@ -850,12 +864,24 @@ class ActionRunner:
         duck_logged = False
         peak_health: Optional[float] = None
         sweep_idx = 0
+        sweep_offset_x = 0
+        sweep_offset_y = 0
         shots_fired = 0
         no_enemy_ticks = 0
         no_enemy_since_t: Optional[float] = None
         aligned_ticks = 0
-        consecutive_steer_ticks = 0
-        last_steer_bearing: Optional[float] = None
+        steer_cadence_ticks = 0
+        large_steer_ticks = 0
+        clamped_ticks = 0
+        last_clamped_bearing: Optional[float] = None
+
+        def _recenter_sweep() -> None:
+            nonlocal sweep_idx, sweep_offset_x, sweep_offset_y
+            if sweep_offset_x != 0 or sweep_offset_y != 0:
+                self.input.mouse_delta(-sweep_offset_x, -sweep_offset_y, steps=2, duration_s=0.03)
+                sweep_offset_x = 0
+                sweep_offset_y = 0
+            sweep_idx = 0
 
         def _set_peek(want_peek: bool, now_t: float) -> None:
             nonlocal is_peeking, peek_start_t
@@ -866,11 +892,12 @@ class ActionRunner:
                 if aim_settle_s > 0:
                     self._sleep(aim_settle_s)
             elif not want_peek and is_peeking:
+                _recenter_sweep()
                 self.input.mouse_up(aim_button)
                 is_peeking = False
 
         def _on_tick(state: FrameState) -> Optional[str]:
-            nonlocal special_triggered, duck_until_t, duck_logged, peak_health, sweep_idx, shots_fired, no_enemy_ticks, no_enemy_since_t, aligned_ticks, consecutive_steer_ticks, last_steer_bearing
+            nonlocal special_triggered, duck_until_t, duck_logged, peak_health, sweep_idx, sweep_offset_x, sweep_offset_y, shots_fired, no_enemy_ticks, no_enemy_since_t, aligned_ticks, steer_cadence_ticks, large_steer_ticks, clamped_ticks, last_clamped_bearing
             mm = state.minimap
             now_t = state.elapsed_s
 
@@ -918,75 +945,105 @@ class ActionRunner:
                 no_enemy_ticks = 0
                 no_enemy_since_t = None
                 aligned_ticks = 0
-                consecutive_steer_ticks = 0
-                self._fire_bursts(fire_button, bursts=3, hold_s=0.03, gap_s=0.025)
+                steer_cadence_ticks = 0
+                large_steer_ticks = 0
+                clamped_ticks = 0
+                last_clamped_bearing = None
+                self._fire_bursts(fire_button, bursts=3, hold_s=0.03, gap_s=0.025, reason="red_reticle")
                 shots_fired += 1
                 if max_shots is not None and shots_fired >= max_shots:
+                    _recenter_sweep()
                     return "reticle_shots_done"
                 return None
 
             enemy = mm.nearest_enemy
-            if enemy is not None and abs(enemy.bearing) > bearing_deadband:
-                no_enemy_ticks = 0
-                no_enemy_since_t = None
-                if last_steer_bearing is not None and abs(enemy.bearing - last_steer_bearing) < 0.03:
-                    consecutive_steer_ticks += 1
-                else:
-                    consecutive_steer_ticks = 1
-                last_steer_bearing = enemy.bearing
-
-                # Only treat as cover-clamped when target stays stuck genuinely outside cover FOV (> 0.45).
-                if abs(enemy.bearing) > 0.45 and consecutive_steer_ticks >= 8:
-                    self._logger.log(
-                        tool="runner",
-                        action="cover_clamped",
-                        status="ok",
-                        details={"bearing": round(enemy.bearing, 3)},
-                    )
-                    return "cover_clamped"
-
-                # Keep aim held in cover (releasing right pulls back into cover and resets cover yaw).
-                if consecutive_steer_ticks < 3 or abs(enemy.bearing) > 0.35:
-                    aligned_ticks = 0
-                    dx = int(round(max(-220.0, min(220.0, enemy.bearing * steer_gain))))
-                    if dx != 0:
-                        self._steer_camera(dx, 0)
-                        if abs(dx) >= 30:
-                            sweep_idx = 0
-                    return None
-                if consecutive_steer_ticks % 5 == 0 and abs(enemy.bearing) <= 0.45:
-                    dx = int(round(max(-90.0, min(90.0, enemy.bearing * 110.0))))
-                    if dx != 0:
-                        self._steer_camera(dx, 0)
-            else:
-                consecutive_steer_ticks = 0
-                last_steer_bearing = None
-
             if enemy is None:
+                steer_cadence_ticks = 0
+                large_steer_ticks = 0
+                clamped_ticks = 0
+                last_clamped_bearing = None
                 no_enemy_ticks += 1
                 if no_enemy_since_t is None:
                     no_enemy_since_t = now_t
                 aligned_ticks = 0
                 if stop_when_no_enemies:
                     if empty_scans_to_stop is not None and no_enemy_ticks >= empty_scans_to_stop:
+                        _recenter_sweep()
                         return "enemies_cleared"
                     if empty_scans_to_stop is None and (now_t - no_enemy_since_t) >= no_enemies_clear_s:
+                        _recenter_sweep()
                         return "enemies_cleared"
             else:
                 no_enemy_ticks = 0
                 no_enemy_since_t = None
-                aligned_ticks += 1
-                if aligned_ticks % 4 == 0:
-                    self._fire_bursts(fire_button, bursts=2, hold_s=0.03, gap_s=0.03)
-                    shots_fired += 1
-                    if max_shots is not None and shots_fired >= max_shots:
-                        return "suppressive_shots_done"
+
+                # Only treat as cover-clamped when target stays stuck genuinely outside cover FOV (> 0.45).
+                if abs(enemy.bearing) > 0.45:
+                    if (
+                        last_clamped_bearing is not None
+                        and (enemy.bearing * last_clamped_bearing) > 0
+                        and abs(enemy.bearing - last_clamped_bearing) < 0.06
+                    ):
+                        clamped_ticks += 1
+                    else:
+                        clamped_ticks = 1
+                    last_clamped_bearing = enemy.bearing
+                    if clamped_ticks >= 8:
+                        self._logger.log(
+                            tool="runner",
+                            action="cover_clamped",
+                            status="ok",
+                            details={"bearing": round(enemy.bearing, 3)},
+                        )
+                        _recenter_sweep()
+                        return "cover_clamped"
+                else:
+                    clamped_ticks = 0
+                    last_clamped_bearing = None
+
+                # Keep aim held in cover (releasing right pulls back into cover and resets cover yaw).
+                if abs(enemy.bearing) > bearing_deadband:
+                    steer_cadence_ticks += 1
+                    if abs(enemy.bearing) > 0.35:
+                        large_steer_ticks += 1
+                        if large_steer_ticks <= 2 or large_steer_ticks % 3 == 0:
+                            dx = int(round(max(-220.0, min(220.0, enemy.bearing * steer_gain))))
+                            if dx != 0:
+                                if abs(dx) >= 60:
+                                    _recenter_sweep()
+                                self._steer_camera(dx, 0)
+                        if large_steer_ticks <= 2:
+                            aligned_ticks = 0
+                            return None
+                    else:
+                        large_steer_ticks = 0
+                        # In-FOV yaw tracking: nudge smoothly every other tick without resetting sweep/fire.
+                        if steer_cadence_ticks % 2 == 1:
+                            dx = int(round(max(-110.0, min(110.0, enemy.bearing * 130.0))))
+                            if dx != 0:
+                                self._steer_camera(dx, 0)
+                else:
+                    steer_cadence_ticks = 0
+                    large_steer_ticks = 0
+
+                if abs(enemy.bearing) <= 0.30:
+                    aligned_ticks += 1
+                    if aligned_ticks % 3 == 0:
+                        self._fire_bursts(fire_button, bursts=2, hold_s=0.03, gap_s=0.03, reason="suppressive")
+                        shots_fired += 1
+                        if max_shots is not None and shots_fired >= max_shots:
+                            _recenter_sweep()
+                            return "suppressive_shots_done"
+                else:
+                    aligned_ticks = 0
 
             if scan_pattern:
                 dx, dy = scan_pattern[sweep_idx % len(scan_pattern)]
                 sweep_idx += 1
                 if dx != 0 or dy != 0:
                     self.input.mouse_delta(dx, dy, steps=2, duration_s=0.03)
+                    sweep_offset_x += dx
+                    sweep_offset_y += dy
             return None
 
         return self._run_loop(

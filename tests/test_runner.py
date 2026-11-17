@@ -8,7 +8,7 @@ from PIL import Image, ImageDraw
 from gameplayer.hud import OcrLine
 from gameplayer.input import InputController
 from gameplayer.runner import DEFAULT_RETICLE_SWEEP, ActionRunner, LoopConfig, detect_red_reticle
-from gameplayer.telemetry import TelemetryLogger
+from gameplayer.telemetry import TelemetryLogger, read_telemetry
 from gameplayer.window import WindowBounds, WindowInfo
 from tests.test_minimap import make_synthetic_minimap_frame
 
@@ -525,4 +525,57 @@ def test_cover_peek_combat_keeps_aim_held_and_fires_suppressive_within_fov(tmp_p
     # Right-click aim must only release once at loop teardown, never mid-peek during steering
     right_ups = [ev for ev in backend.events if ev == ("mouse_up", "right")]
     assert len(right_ups) == 1
+    assert backend.currently_held_buttons == set()
+
+
+def test_cover_peek_combat_fires_and_sweeps_through_bearing_jitter_and_logs_telemetry(tmp_path) -> None:
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    log_path = tmp_path / "t.jsonl"
+    logger = TelemetryLogger(log_path)
+    ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
+
+    # Bearing alternates left/right every tick (|delta| >= 0.30): must not reset aligned_ticks or starve sweep/fire.
+    f_left = _with_center_reticle(make_synthetic_minimap_frame(health_ratio=0.95, red_points=[(0.34, 0.45)]), (245, 245, 245))
+    f_right = _with_center_reticle(make_synthetic_minimap_frame(health_ratio=0.95, red_points=[(0.68, 0.45)]), (245, 245, 245))
+    win_backend = ReplayWindowBackend(lambda idx: f_left if idx % 2 == 0 else f_right)
+    runner = ActionRunner(ctrl, win_backend, ScriptedHudOCR(lambda idx: {}), logger, clock, clock.sleep)
+
+    res = runner.cover_peek_combat(
+        enter_cover=False,
+        use_special=False,
+        max_shots=3,
+        config=LoopConfig(max_duration_s=4.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert res.stop_reason == "suppressive_shots_done"
+    assert ("mouse_down", "left") in backend.events
+    assert any(ev[0] == "mouse_delta" and ev[1][1] != 0 for ev in backend.events)
+    fire_records = [r for r in read_telemetry(log_path, tool="runner") if r.get("action") == "fire_burst"]
+    assert len(fire_records) == 3
+    assert all(r["details"]["reason"] == "suppressive" for r in fire_records)
+    assert backend.currently_held_buttons == set()
+
+
+def test_cover_peek_combat_recenters_sweep_pitch_across_cover_ducks(tmp_path) -> None:
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    logger = TelemetryLogger(tmp_path / "t.jsonl")
+    ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
+
+    f_enemy = _with_center_reticle(make_synthetic_minimap_frame(health_ratio=0.95, red_points=[(0.50, 0.40)]), (245, 245, 245))
+    f_clear = make_synthetic_minimap_frame(health_ratio=0.95, red_points=[])
+    # Run ~9 ticks of enemy (peek_burst_s=0.65 forces mid-sweep duck after +20 dy step), then clear enemies.
+    win_backend = ReplayWindowBackend(lambda idx: f_enemy if idx < 11 else f_clear)
+    runner = ActionRunner(ctrl, win_backend, ScriptedHudOCR(lambda idx: {}), logger, clock, clock.sleep)
+
+    res = runner.cover_peek_combat(
+        enter_cover=False,
+        use_special=False,
+        peek_burst_s=0.65,
+        no_enemies_clear_s=0.25,
+        config=LoopConfig(max_duration_s=5.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert res.stop_reason == "enemies_cleared"
+    total_dy = sum(ev[1][1] for ev in backend.events if ev[0] == "mouse_delta")
+    assert total_dy == 0
     assert backend.currently_held_buttons == set()
