@@ -18,25 +18,25 @@ from gameplayer.window import CaptureResult, WindowBackend, WindowInfo, capture_
 
 DEFAULT_RETICLE_SWEEP: tuple[tuple[int, int], ...] = (
     (0, 0),
-    (36, 0),
-    (36, 0),
-    (-108, 0),
+    (18, 0),
+    (18, 0),
+    (-54, 0),
+    (-18, 0),
+    (36, -22),
+    (18, 0),
+    (18, 0),
+    (-54, 0),
+    (-18, 0),
+    (36, -26),
+    (18, 0),
     (-36, 0),
-    (72, -22),
-    (36, 0),
-    (36, 0),
-    (-108, 0),
-    (-36, 0),
-    (72, -26),
-    (36, 0),
-    (-72, 0),
-    (36, -30),
-    (36, 0),
-    (-72, 0),
-    (36, 88),
-    (36, 0),
-    (-72, 0),
-    (36, -10),
+    (18, -26),
+    (24, 0),
+    (-48, 0),
+    (24, 84),
+    (24, 0),
+    (-48, 0),
+    (24, -10),
 )
 
 
@@ -413,6 +413,29 @@ class ActionRunner:
         finally:
             self.input.key_up(sidestep_key)
 
+    def _perform_on_foot_backpedal(self, attempt: int, duration_s: float = 0.4) -> None:
+        """Briefly backpedal diagonally away from close exposed fire."""
+        strafe_key = "a" if attempt % 2 == 0 else "d"
+        self._logger.log(
+            tool="runner",
+            action="on_foot_backpedal",
+            status="ok",
+            details={
+                "attempt": attempt,
+                "strafe_key": strafe_key,
+                "duration_s": duration_s,
+            },
+        )
+        self.input.key_down("s")
+        try:
+            self.input.key_down(strafe_key)
+            try:
+                self._sleep_chunked(duration_s)
+            finally:
+                self.input.key_up(strafe_key)
+        finally:
+            self.input.key_up("s")
+
     @staticmethod
     def _resolve_route_target_and_bearing(
         mm: MinimapObservation,
@@ -541,19 +564,19 @@ class ActionRunner:
         engage_phase_s: float = 3.2,
         engage_distance: float = 0.65,
         close_enemy_hold_distance: float = 0.28,
-        min_engage_health: float = 0.45,
+        min_engage_health: float = 0.25,
         recover_health: float = 0.50,
         recover_target_health: float = 0.50,
         recover_wait_s: float = 2.5,
         use_special: bool = True,
         recoil_comp_dy: int = 0,
         aim_settle_s: float = 0.15,
-        exposed_recover_drop_threshold: float = 0.12,
+        exposed_recover_drop_threshold: float = 0.04,
         steer_gain: float = 160.0,
         engage_steer_gain: float = 200.0,
         deadband: float = 0.06,
         bearing_deadband: float = 0.025,
-        engage_align_bearing: float = 0.08,
+        engage_align_bearing: float = 0.06,
         stop_on_subtitle_keywords: Sequence[str] = ("get in", "enter", "vehicle", "car"),
         tether_subtitle_keywords: Sequence[str] = ("return to", "wait for", "stay with", "follow"),
         enable_stuck_recovery: bool = True,
@@ -671,6 +694,21 @@ class ActionRunner:
 
             blue_targets = mm.targets.get("blue", ())
             blue_ally = blue_targets[0] if blue_targets else None
+            enemy = mm.nearest_enemy
+
+            def _resume_move_from_recover(*, tether: bool = False, cooldown_s: float = 0.0) -> None:
+                nonlocal phase, phase_end_t, min_move_until_t, engage_cooldown_until_t
+                nonlocal recover_cooldown_until_t, recover_start_health, tether_active_until_t
+                phase = "move"
+                if tether:
+                    tether_active_until_t = max(tether_active_until_t, now_t + 2.5)
+                phase_end_t = now_t + move_phase_s
+                min_move_until_t = now_t + move_phase_s
+                engage_cooldown_until_t = now_t + move_phase_s
+                if cooldown_s > 0.0:
+                    recover_cooldown_until_t = now_t + cooldown_s
+                recover_start_health = None
+                _reset_motion_tracker()
 
             # Low-health cover/recover phase
             if (
@@ -681,19 +719,38 @@ class ActionRunner:
             ):
                 _set_aim(False)
                 _set_movement(False)
-                phase = "recover"
-                phase_end_t = now_t + recover_wait_s
-                recover_cooldown_until_t = phase_end_t + 3.0
-                recover_start_health = mm.health_ratio
-                _reset_motion_tracker()
-                self._tap_key_preserving_held("q", hold_s=0.08)
-                self._logger.log(
-                    tool="runner",
-                    action="advance_recover",
-                    status="ok",
-                    details={"health_ratio": round(mm.health_ratio, 3), "wait_s": recover_wait_s},
-                )
-                return None
+                if (
+                    enemy is not None
+                    and enemy.distance < 0.45
+                    and blue_ally is not None
+                    and blue_ally.distance > 0.14
+                    and abs(blue_ally.bearing) > 0.35
+                ):
+                    _resume_move_from_recover(tether=True, cooldown_s=1.5)
+                    self._logger.log(
+                        tool="runner",
+                        action="advance_retreat",
+                        status="ok",
+                        details={
+                            "health_ratio": round(mm.health_ratio, 3),
+                            "ally_distance": round(blue_ally.distance, 3),
+                            "enemy_distance": round(enemy.distance, 3),
+                        },
+                    )
+                else:
+                    phase = "recover"
+                    phase_end_t = now_t + recover_wait_s
+                    recover_cooldown_until_t = phase_end_t + 3.0
+                    recover_start_health = mm.health_ratio
+                    _reset_motion_tracker()
+                    self._tap_key_preserving_held("q", hold_s=0.08)
+                    self._logger.log(
+                        tool="runner",
+                        action="advance_recover",
+                        status="ok",
+                        details={"health_ratio": round(mm.health_ratio, 3), "wait_s": recover_wait_s},
+                    )
+                    return None
 
             if phase == "recover":
                 if (
@@ -702,20 +759,17 @@ class ActionRunner:
                     and (recover_start_health - mm.health_ratio) >= exposed_recover_drop_threshold
                 ):
                     if blue_ally is not None and blue_ally.distance > 0.14:
-                        phase = "move"
-                        tether_active_until_t = max(tether_active_until_t, now_t + 2.5)
-                        phase_end_t = now_t + move_phase_s
-                        min_move_until_t = now_t + move_phase_s
-                        engage_cooldown_until_t = now_t + move_phase_s
-                        recover_cooldown_until_t = now_t + 1.5
-                        recover_start_health = None
-                        _reset_motion_tracker()
+                        _resume_move_from_recover(tether=True, cooldown_s=1.5)
                         self._logger.log(
                             tool="runner",
                             action="advance_retreat",
                             status="ok",
                             details={"health_ratio": round(mm.health_ratio, 3), "ally_distance": round(blue_ally.distance, 3)},
                         )
+                    elif enemy is not None and enemy.distance < 0.45 and mm.health_ratio >= 0.25:
+                        recovery_count += 1
+                        self._perform_on_foot_backpedal(attempt=recovery_count, duration_s=0.4)
+                        _resume_move_from_recover(cooldown_s=1.5)
                     elif mm.health_ratio < 0.25:
                         _set_aim(False)
                         _set_movement(False)
@@ -729,17 +783,11 @@ class ActionRunner:
                 if phase == "recover":
                     if now_t < phase_end_t and (not mm.minimap_visible or mm.health_ratio < recover_target_health):
                         return None
-                    phase = "move"
-                    phase_end_t = now_t + move_phase_s
-                    min_move_until_t = now_t + move_phase_s
-                    engage_cooldown_until_t = now_t + move_phase_s
-                    recover_start_health = None
-                    _reset_motion_tracker()
+                    _resume_move_from_recover()
 
             need_ally_tether = (now_t < tether_active_until_t) or (
                 blue_ally is not None and blue_ally.distance > ally_tether_distance
             )
-            enemy = mm.nearest_enemy
             if need_ally_tether and blue_ally is not None:
                 nav_bearing = blue_ally.bearing
             elif route_bearing is not None:
@@ -810,7 +858,7 @@ class ActionRunner:
                             self._steer_camera(dx, 0)
                     if abs(enemy.bearing) <= engage_align_bearing:
                         aligned_ticks += 1
-                        if aligned_ticks % 3 == 0:
+                        if aligned_ticks % 5 == 0:
                             self._fire_bursts("left", bursts=2, hold_s=0.03, gap_s=0.03, reason="suppressive")
                             if recoil_comp_dy > 0:
                                 self.input.mouse_delta(0, int(recoil_comp_dy), steps=1, duration_s=0.01)

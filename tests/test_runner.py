@@ -821,7 +821,6 @@ def test_advance_under_fire_alternates_move_engage_recover_and_stops_on_vehicle_
         special_ratio=0.80,
         yellow_points=[(0.50, 0.25)],
         blue_points=[(0.50, 0.70)],
-        red_points=[(0.50, 0.42)],
     )
     f_engage_red = _with_center_reticle(
         make_synthetic_minimap_frame(
@@ -1041,3 +1040,90 @@ def test_advance_under_fire_holds_close_engage_no_combat_vault_and_blue_fallback
     )
     assert any(ev[0] == "mouse_delta" and ev[1][0] > 0 for ev in backend2.events)
     assert backend2.currently_held_keys == set()
+
+
+def test_advance_under_fire_exposed_drop_retreats_or_backpedals_above_floor(tmp_path) -> None:
+    # 1) Recover entry with close enemy (< 0.45) and distant ally behind (|bearing| > 0.35) retreats immediately.
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    log_path = tmp_path / "t_imm.jsonl"
+    logger = TelemetryLogger(log_path)
+    ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
+    f_entry = make_synthetic_minimap_frame(
+        health_ratio=0.45,
+        yellow_points=[(0.50, 0.25)],
+        blue_points=[(0.50, 0.92)],   # behind Trevor -> |bearing| > 0.35, distance > 0.14
+        red_points=[(0.50, 0.62)],    # close enemy < 0.45
+    )
+    runner = ActionRunner(ctrl, ReplayWindowBackend(lambda idx: f_entry), ScriptedHudOCR(lambda idx: {}), logger, clock, clock.sleep)
+    runner.advance_under_fire(
+        recover_wait_s=2.5,
+        config=LoopConfig(max_duration_s=0.5, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    logs = read_telemetry(log_path, tool="runner")
+    assert any(r.get("action") == "advance_retreat" for r in logs)
+    assert not any(r.get("action") == "advance_recover" for r in logs)
+    assert backend.currently_held_keys == set()
+
+    # 2) Recover drop >= 0.04 (0.46 -> 0.41) with near blue ally (<= 0.14) and close enemy (< 0.45) backpedals instead of dying.
+    clock2 = FakeClock()
+    backend2 = RecordingInputBackend()
+    log_path2 = tmp_path / "t_bp.jsonl"
+    logger2 = TelemetryLogger(log_path2)
+    ctrl2 = InputController(backend=backend2, logger=logger2, clock=clock2, sleep_fn=clock2.sleep, register_signals=False)
+    f_rec = make_synthetic_minimap_frame(
+        health_ratio=0.46,
+        yellow_points=[(0.50, 0.25)],
+        blue_points=[(0.50, 0.72)],   # near Trevor -> distance <= 0.14
+        red_points=[(0.50, 0.60)],    # close enemy < 0.45
+    )
+    f_drop = make_synthetic_minimap_frame(
+        health_ratio=0.41,            # drop = 0.05 >= 0.04, stays >= 0.25
+        yellow_points=[(0.50, 0.25)],
+        blue_points=[(0.50, 0.72)],
+        red_points=[(0.50, 0.60)],
+    )
+    runner2 = ActionRunner(ctrl2, ReplayWindowBackend(lambda idx: f_rec if idx == 0 else f_drop), ScriptedHudOCR(lambda idx: {}), logger2, clock2, clock2.sleep)
+    res2 = runner2.advance_under_fire(
+        recover_wait_s=2.5,
+        config=LoopConfig(max_duration_s=1.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert res2.stop_reason != "low_health"
+    assert any(r.get("action") == "on_foot_backpedal" for r in read_telemetry(log_path2, tool="runner"))
+    assert ("key_down", "s") in backend2.events
+    assert ("key_up", "s") in backend2.events
+    assert backend2.currently_held_keys == set()
+
+
+def test_reticle_sweep_finer_horizontal_step_and_reduced_suppressive_cadence(tmp_path) -> None:
+    assert (18, 0) in DEFAULT_RETICLE_SWEEP
+    assert (36, 0) not in DEFAULT_RETICLE_SWEEP
+
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    log_path = tmp_path / "t_cadence.jsonl"
+    logger = TelemetryLogger(log_path)
+    ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
+    f_aligned = _with_center_reticle(
+        make_synthetic_minimap_frame(
+            health_ratio=0.90,
+            red_points=[(0.50, 0.56)],  # directly ahead, close enough to enter engage immediately
+        ),
+        (240, 240, 240),
+    )
+    runner = ActionRunner(ctrl, ReplayWindowBackend(lambda idx: f_aligned), ScriptedHudOCR(lambda idx: {}), logger, clock, clock.sleep)
+    runner.advance_under_fire(
+        aim_settle_s=0.0,
+        move_phase_s=0.0,
+        engage_phase_s=2.0,
+        scan_pattern=(),
+        config=LoopConfig(max_duration_s=0.95, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    suppressive_logs = [
+        r for r in read_telemetry(log_path, tool="runner")
+        if r.get("action") == "fire_burst" and r.get("details", {}).get("reason") == "suppressive"
+    ]
+    # 9-10 ticks with % 5 == 0 -> at most 2 suppressive triggers (specifically at tick 5 -> 1 trigger before 0.95s if 9 ticks, or 2 if 10)
+    assert 1 <= len(suppressive_logs) <= 2
+    assert backend.currently_held_keys == set()
+    assert backend.currently_held_buttons == set()
