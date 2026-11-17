@@ -20,21 +20,20 @@ DEFAULT_RETICLE_SWEEP: tuple[tuple[int, int], ...] = (
     (0, 0),
     (22, 0),
     (26, 0),
-    (30, 0),
-    (-104, 0),
+    (-70, 0),
     (-26, 0),
-    (-30, 0),
-    (82, -16),
+    (48, 20),
+    (24, 0),
     (26, 0),
-    (30, 0),
-    (-86, 0),
-    (-30, 0),
-    (86, 32),
-    (26, 0),
-    (30, 0),
-    (-86, 0),
-    (-30, 0),
-    (86, -16),
+    (-74, 0),
+    (-26, 0),
+    (50, 18),
+    (24, 0),
+    (-48, 0),
+    (24, -52),
+    (24, 0),
+    (-48, 0),
+    (24, 14),
 )
 
 
@@ -685,7 +684,7 @@ class ActionRunner:
                     aligned_without_lock_ticks = 0
                     dx = int(round(max(-220.0, min(220.0, enemy.bearing * steer_gain))))
                     if dx != 0:
-                        self._steer_camera(dx, 0, release_aim_button=aim_button)
+                        self._steer_camera(dx, 0, release_aim_button=aim_button if abs(dx) >= 60 else None)
                         if abs(dx) >= 30:
                             sweep_idx = 0
                     return None
@@ -789,7 +788,7 @@ class ActionRunner:
             max_shots=max_shots,
             empty_scans_to_stop=empty_scans_to_stop,
             fallback_fire_on_aligned=fallback_fire_on_aligned,
-            fallback_fire_interval_ticks=6,
+            fallback_fire_interval_ticks=4,
             reacquire_aim_interval_ticks=18,
             config=cfg,
         )
@@ -920,7 +919,7 @@ class ActionRunner:
                 no_enemy_since_t = None
                 aligned_ticks = 0
                 consecutive_steer_ticks = 0
-                self._fire_bursts(fire_button, bursts=2, hold_s=0.03, gap_s=0.03)
+                self._fire_bursts(fire_button, bursts=3, hold_s=0.03, gap_s=0.025)
                 shots_fired += 1
                 if max_shots is not None and shots_fired >= max_shots:
                     return "reticle_shots_done"
@@ -936,7 +935,8 @@ class ActionRunner:
                     consecutive_steer_ticks = 1
                 last_steer_bearing = enemy.bearing
 
-                if consecutive_steer_ticks >= 8:
+                # Only treat as cover-clamped when target stays stuck genuinely outside cover FOV (> 0.45).
+                if abs(enemy.bearing) > 0.45 and consecutive_steer_ticks >= 8:
                     self._logger.log(
                         tool="runner",
                         action="cover_clamped",
@@ -945,15 +945,19 @@ class ActionRunner:
                     )
                     return "cover_clamped"
 
-                # If camera yaw appears clamped inside FOV, fall through to sweep/suppressive fire instead of spinning
-                if consecutive_steer_ticks < 4 or abs(enemy.bearing) > 0.35:
+                # Keep aim held in cover (releasing right pulls back into cover and resets cover yaw).
+                if consecutive_steer_ticks < 3 or abs(enemy.bearing) > 0.35:
                     aligned_ticks = 0
                     dx = int(round(max(-220.0, min(220.0, enemy.bearing * steer_gain))))
                     if dx != 0:
-                        self._steer_camera(dx, 0, release_aim_button=aim_button if is_peeking else None)
+                        self._steer_camera(dx, 0)
                         if abs(dx) >= 30:
                             sweep_idx = 0
                     return None
+                if consecutive_steer_ticks % 5 == 0 and abs(enemy.bearing) <= 0.45:
+                    dx = int(round(max(-90.0, min(90.0, enemy.bearing * 110.0))))
+                    if dx != 0:
+                        self._steer_camera(dx, 0)
             else:
                 consecutive_steer_ticks = 0
                 last_steer_bearing = None
@@ -972,7 +976,7 @@ class ActionRunner:
                 no_enemy_ticks = 0
                 no_enemy_since_t = None
                 aligned_ticks += 1
-                if aligned_ticks % 6 == 0:
+                if aligned_ticks % 4 == 0:
                     self._fire_bursts(fire_button, bursts=2, hold_s=0.03, gap_s=0.03)
                     shots_fired += 1
                     if max_shots is not None and shots_fired >= max_shots:

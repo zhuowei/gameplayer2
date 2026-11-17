@@ -7,7 +7,7 @@ from PIL import Image, ImageDraw
 
 from gameplayer.hud import OcrLine
 from gameplayer.input import InputController
-from gameplayer.runner import ActionRunner, LoopConfig, detect_red_reticle
+from gameplayer.runner import DEFAULT_RETICLE_SWEEP, ActionRunner, LoopConfig, detect_red_reticle
 from gameplayer.telemetry import TelemetryLogger
 from gameplayer.window import WindowBounds, WindowInfo
 from tests.test_minimap import make_synthetic_minimap_frame
@@ -490,3 +490,39 @@ def test_follow_gps_drive_stuck_recovery_and_moving_no_false_trigger(tmp_path) -
     )
     assert ("key_down", "s") not in backend2.events
     assert backend2.currently_held_keys == set()
+
+
+def test_default_reticle_sweep_zero_net_drift_and_scans_torso_heights() -> None:
+    assert sum(dx for dx, _ in DEFAULT_RETICLE_SWEEP) == 0
+    assert sum(dy for _, dy in DEFAULT_RETICLE_SWEEP) == 0
+    cum_y = 0
+    ys = []
+    for _, dy in DEFAULT_RETICLE_SWEEP:
+        cum_y += dy
+        ys.append(cum_y)
+    assert max(ys) >= 30
+    assert min(ys) < 0
+
+
+def test_cover_peek_combat_keeps_aim_held_and_fires_suppressive_within_fov(tmp_path) -> None:
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    ctrl = InputController(backend=backend, logger=TelemetryLogger(tmp_path / "t.jsonl"), clock=clock, sleep_fn=clock.sleep, register_signals=False)
+
+    # Enemy inside FOV (-0.25 bearing): must keep right-click held while steering/sweeping and fire suppressive bursts instead of aborting cover_clamped.
+    in_fov_frame = _with_center_reticle(make_synthetic_minimap_frame(health_ratio=0.95, red_points=[(0.30, 0.45)]), (245, 245, 245))
+    win_backend = ReplayWindowBackend(lambda idx: in_fov_frame)
+    runner = ActionRunner(ctrl, win_backend, ScriptedHudOCR(lambda idx: {}), TelemetryLogger(tmp_path / "t.jsonl"), clock, clock.sleep)
+
+    res = runner.cover_peek_combat(
+        enter_cover=False,
+        use_special=False,
+        max_shots=2,
+        config=LoopConfig(max_duration_s=4.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert res.stop_reason == "suppressive_shots_done"
+    assert ("mouse_down", "left") in backend.events
+    # Right-click aim must only release once at loop teardown, never mid-peek during steering
+    right_ups = [ev for ev in backend.events if ev == ("mouse_up", "right")]
+    assert len(right_ups) == 1
+    assert backend.currently_held_buttons == set()
