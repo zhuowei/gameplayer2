@@ -244,7 +244,14 @@ def test_detect_red_reticle_distinguishes_hostile_dot_from_white_and_red_wall() 
     white_reticle = _with_center_reticle(base, (250, 250, 250))
     uniform_red_wall = Image.new("RGB", (1280, 720), (210, 30, 30))
 
+    # Tiny 3x3 red Simple reticle dot over dim red-lit wall (real GTA 5 Prologue scenario)
+    dim_red_wall = Image.new("RGB", (1280, 720), (78, 21, 12))
+    draw = ImageDraw.Draw(dim_red_wall)
+    cx, cy = 640, 360
+    draw.rectangle((cx - 1, cy - 1, cx + 1, cy + 1), fill=(205, 38, 35))
+
     assert detect_red_reticle(red_reticle).is_red is True
+    assert detect_red_reticle(dim_red_wall).is_red is True
     assert detect_red_reticle(white_reticle).is_red is False
     assert detect_red_reticle(uniform_red_wall).is_red is False
 

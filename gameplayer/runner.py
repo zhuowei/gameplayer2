@@ -18,15 +18,21 @@ from gameplayer.window import CaptureResult, WindowBackend, capture_game_window
 
 DEFAULT_RETICLE_SWEEP: tuple[tuple[int, int], ...] = (
     (0, 0),
-    (22, 0),
-    (-44, 0),
-    (22, -14),
+    (24, 0),
     (28, 0),
-    (-56, 0),
-    (28, 28),
+    (32, 0),
+    (-108, 0),
+    (-28, 0),
+    (-32, 0),
+    (84, -18),
     (28, 0),
-    (-56, 0),
-    (28, -14),
+    (32, 0),
+    (-88, 0),
+    (-32, 0),
+    (88, 36),
+    (28, 0),
+    (-88, 0),
+    (28, -18),
 )
 
 
@@ -43,8 +49,8 @@ def detect_red_reticle(image: Image.Image) -> ReticleStatus:
     arr = np.asarray(image.convert("RGB"), dtype=np.int16)
     h, w, _ = arr.shape
     cx, cy = w // 2, h // 2
-    inner_rx = max(6, int(round(w * 0.008)))
-    inner_ry = max(6, int(round(h * 0.014)))
+    inner_rx = max(3, int(round(w * 0.0035)))
+    inner_ry = max(3, int(round(h * 0.006)))
     outer_rx = max(18, int(round(w * 0.032)))
     outer_ry = max(18, int(round(h * 0.055)))
 
@@ -57,7 +63,7 @@ def detect_red_reticle(image: Image.Image) -> ReticleStatus:
     b = patch[:, :, 2]
 
     red_excess = r - np.maximum(g, b)
-    red_mask = (r >= 180) & (g <= 95) & (b <= 95) & (red_excess >= 95)
+    red_mask = (r >= 165) & (g <= 95) & (b <= 95) & (red_excess >= 90)
 
     py, px = patch.shape[0] // 2, patch.shape[1] // 2
     inner_slice = (
@@ -73,11 +79,12 @@ def detect_red_reticle(image: Image.Image) -> ReticleStatus:
     outer_red_pixels = int(np.count_nonzero(red_mask & outer_mask))
     outer_red_fraction = outer_red_pixels / outer_total
 
-    inner_mean_excess = float(np.mean(red_excess[inner_slice]))
-    outer_mean_excess = float(np.mean(red_excess[outer_mask]))
-    contrast_score = inner_mean_excess - outer_mean_excess
+    if inner_pixels > 0:
+        contrast_score = float(np.mean(red_excess[inner_slice][inner_mask])) - float(np.mean(red_excess[outer_mask]))
+    else:
+        contrast_score = 0.0
 
-    is_red = inner_pixels >= 3 and (contrast_score >= 18.0 or outer_red_fraction < 0.35)
+    is_red = inner_pixels >= 2 and contrast_score >= 40.0 and outer_red_fraction < 0.25
     return ReticleStatus(
         is_red=is_red,
         center_red_pixels=inner_pixels,
@@ -430,8 +437,8 @@ class ActionRunner:
         self,
         aim_button: str = "right",
         fire_button: str = "left",
-        steer_gain: float = 180.0,
-        align_threshold: float = 0.12,
+        steer_gain: float = 220.0,
+        align_threshold: float = 0.05,
         scan_step_dx: int = 85,
         empty_scans_to_stop: Optional[int] = 10,
         config: Optional[LoopConfig] = None,
@@ -474,7 +481,9 @@ class ActionRunner:
         bursts: int = 2,
         stop_on_shot: bool = True,
         max_shots: int = 1,
-        steer_gain: float = 150.0,
+        steer_gain: float = 220.0,
+        bearing_deadband: float = 0.04,
+        aim_settle_s: float = 0.18,
         scan_pattern: Sequence[tuple[int, int]] = DEFAULT_RETICLE_SWEEP,
         empty_scans_to_stop: Optional[int] = None,
         config: Optional[LoopConfig] = None,
@@ -487,6 +496,10 @@ class ActionRunner:
 
         def _on_tick(state: FrameState) -> Optional[str]:
             nonlocal sweep_idx, shots_fired, no_enemy_ticks
+            if state.tick == 0 and aim_settle_s > 0:
+                self._sleep(aim_settle_s)
+                return None
+
             reticle = detect_red_reticle(state.capture.image)
             if reticle.is_red:
                 no_enemy_ticks = 0
@@ -500,9 +513,9 @@ class ActionRunner:
                 return None
 
             enemy = state.minimap.nearest_enemy
-            if enemy is not None and abs(enemy.bearing) > 0.12:
+            if enemy is not None and abs(enemy.bearing) > bearing_deadband:
                 no_enemy_ticks = 0
-                dx = int(round(max(-200.0, min(200.0, enemy.bearing * steer_gain))))
+                dx = int(round(max(-220.0, min(220.0, enemy.bearing * steer_gain))))
                 if dx != 0:
                     self.input.mouse_delta(dx, 0, steps=1, duration_s=0.0)
                 return None
