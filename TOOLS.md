@@ -161,7 +161,8 @@ Fast local ~8–12 Hz perception + control loops (`ActionRunner`) combining `cap
 - `follow_route_on_foot(sprint=False, target_color="yellow", ...)`
 - `follow_gps_drive(route_color="yellow", ...)`
 - `combat_burst_scan(aim_button="right", fire_button="left", ...)`
-- `aim_until_red_reticle(...)` / `hostage_shot(...)` / `shoot_enemies(...)`: holds aim (`right`), sweeps/steers until `detect_red_reticle()` detects hostile red reticle contrast at `(0.5, 0.5)`, and fires precision `left` bursts.
+- `aim_until_red_reticle(...)` / `aim_and_shoot(...)` / `hostage_shot(...)`: holds aim (`right`), sweeps/steers until `detect_red_reticle()` detects hostile red reticle contrast at `(0.5, 0.5)`, and fires precision `left` bursts (strictly waits for red reticle).
+- `shoot_enemies(...)`: multi-target combat loop combining minimap bearing steering, red-reticle precision shots, periodic suppressive bursts when aligned on distant/covered enemies (`fallback_fire_on_aligned=True`), and periodic aim re-tap to pop out of cover / snap.
 - `switch_character(character, method="hotkey" | "wheel")`
 
 Automatically releases ALL held inputs in `finally` on `WASTED`/`BUSTED`/`MISSION_FAILED`/`MISSION_PASSED` banners, new `top_left_help` / subtitle changes, rapid `health_drop`, target reached, or `max_duration_s` timeout.

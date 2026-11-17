@@ -18,21 +18,23 @@ from gameplayer.window import CaptureResult, WindowBackend, capture_game_window
 
 DEFAULT_RETICLE_SWEEP: tuple[tuple[int, int], ...] = (
     (0, 0),
-    (24, 0),
-    (28, 0),
-    (32, 0),
-    (-108, 0),
-    (-28, 0),
-    (-32, 0),
-    (84, -18),
-    (28, 0),
-    (32, 0),
-    (-88, 0),
-    (-32, 0),
-    (88, 36),
-    (28, 0),
-    (-88, 0),
-    (28, -18),
+    (22, 0),
+    (26, 0),
+    (30, 0),
+    (-104, 0),
+    (-26, 0),
+    (-30, 0),
+    (82, -16),
+    (26, 0),
+    (30, 0),
+    (-86, 0),
+    (-30, 0),
+    (86, 32),
+    (26, 0),
+    (30, 0),
+    (-86, 0),
+    (-30, 0),
+    (86, -16),
 )
 
 
@@ -482,20 +484,29 @@ class ActionRunner:
         stop_on_shot: bool = True,
         max_shots: int = 1,
         steer_gain: float = 220.0,
-        bearing_deadband: float = 0.04,
+        bearing_deadband: float = 0.10,
         aim_settle_s: float = 0.18,
         scan_pattern: Sequence[tuple[int, int]] = DEFAULT_RETICLE_SWEEP,
         empty_scans_to_stop: Optional[int] = None,
+        fallback_fire_on_aligned: bool = False,
+        fallback_fire_interval_ticks: int = 6,
+        reacquire_aim_interval_ticks: Optional[int] = None,
         config: Optional[LoopConfig] = None,
     ) -> LoopResult:
-        """Hold aim, sweep/steer until center reticle turns hostile red, and fire precision bursts."""
+        """Hold aim, sweep/steer until center reticle turns hostile red, and fire precision bursts.
+
+        When `fallback_fire_on_aligned=True` (used by `shoot_enemies`), if an enemy is aligned on
+        the minimap (`|bearing| <= bearing_deadband`) but occluded behind distant cover so the reticle
+        stays white, fires periodic suppressive bursts and optionally re-taps aim to pop out/snap.
+        """
         cfg = config or LoopConfig(max_duration_s=6.0, hz=12.0, hud_check_interval_s=0.25)
         sweep_idx = 0
         shots_fired = 0
         no_enemy_ticks = 0
+        aligned_without_lock_ticks = 0
 
         def _on_tick(state: FrameState) -> Optional[str]:
-            nonlocal sweep_idx, shots_fired, no_enemy_ticks
+            nonlocal sweep_idx, shots_fired, no_enemy_ticks, aligned_without_lock_ticks
             if state.tick == 0 and aim_settle_s > 0:
                 self._sleep(aim_settle_s)
                 return None
@@ -503,6 +514,7 @@ class ActionRunner:
             reticle = detect_red_reticle(state.capture.image)
             if reticle.is_red:
                 no_enemy_ticks = 0
+                aligned_without_lock_ticks = 0
                 if fire_on_lock:
                     self._fire_bursts(fire_button, bursts=bursts, hold_s=0.03, gap_s=0.03)
                     shots_fired += 1
@@ -515,17 +527,44 @@ class ActionRunner:
             enemy = state.minimap.nearest_enemy
             if enemy is not None and abs(enemy.bearing) > bearing_deadband:
                 no_enemy_ticks = 0
+                aligned_without_lock_ticks = 0
                 dx = int(round(max(-220.0, min(220.0, enemy.bearing * steer_gain))))
                 if dx != 0:
                     self.input.mouse_delta(dx, 0, steps=1, duration_s=0.0)
+                    if abs(dx) >= 30:
+                        sweep_idx = 0
                 return None
 
             if enemy is None:
                 no_enemy_ticks += 1
+                aligned_without_lock_ticks = 0
                 if empty_scans_to_stop is not None and no_enemy_ticks >= empty_scans_to_stop:
                     return "enemies_cleared"
             else:
                 no_enemy_ticks = 0
+                aligned_without_lock_ticks += 1
+                if (
+                    fallback_fire_on_aligned
+                    and fire_on_lock
+                    and fallback_fire_interval_ticks > 0
+                    and aligned_without_lock_ticks % fallback_fire_interval_ticks == 0
+                ):
+                    self._fire_bursts(fire_button, bursts=max(1, bursts), hold_s=0.03, gap_s=0.03)
+                    shots_fired += 1
+                    if shots_fired >= max_shots:
+                        return "suppressive_shots_done"
+
+                if (
+                    reacquire_aim_interval_ticks is not None
+                    and reacquire_aim_interval_ticks > 0
+                    and aligned_without_lock_ticks % reacquire_aim_interval_ticks == 0
+                ):
+                    self.input.mouse_up(aim_button)
+                    self._sleep(0.08)
+                    self.input.mouse_down(aim_button)
+                    if aim_settle_s > 0:
+                        self._sleep(aim_settle_s)
+                    return None
 
             if scan_pattern:
                 dx, dy = scan_pattern[sweep_idx % len(scan_pattern)]
@@ -569,6 +608,7 @@ class ActionRunner:
             bursts=bursts,
             stop_on_shot=True,
             max_shots=1,
+            fallback_fire_on_aligned=False,
             config=cfg,
         )
 
@@ -576,9 +616,10 @@ class ActionRunner:
         self,
         max_shots: int = 8,
         empty_scans_to_stop: int = 12,
+        fallback_fire_on_aligned: bool = True,
         config: Optional[LoopConfig] = None,
     ) -> LoopResult:
-        """Multi-target combat loop combining minimap enemy steering with red-reticle confirmation."""
+        """Multi-target combat loop: red-reticle precision shots + aligned suppressive bursts."""
         cfg = config or LoopConfig(max_duration_s=10.0, hz=10.0, hud_check_interval_s=0.25)
         return self.aim_until_red_reticle(
             fire_on_lock=True,
@@ -586,5 +627,8 @@ class ActionRunner:
             stop_on_shot=False,
             max_shots=max_shots,
             empty_scans_to_stop=empty_scans_to_stop,
+            fallback_fire_on_aligned=fallback_fire_on_aligned,
+            fallback_fire_interval_ticks=6,
+            reacquire_aim_interval_ticks=18,
             config=cfg,
         )

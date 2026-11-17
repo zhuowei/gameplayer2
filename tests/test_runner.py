@@ -296,3 +296,23 @@ def test_shoot_enemies_steers_and_confirms_red_reticle(tmp_path) -> None:
     assert res.stop_reason == "enemies_cleared"
     assert ("mouse_down", "left") in backend.events
     assert backend.currently_held_buttons == set()
+
+
+def test_shoot_enemies_fires_suppressive_bursts_when_aligned_without_red_reticle(tmp_path) -> None:
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    ctrl = InputController(backend=backend, logger=TelemetryLogger(tmp_path / "t.jsonl"), clock=clock, sleep_fn=clock.sleep, register_signals=False)
+
+    # Distant enemy aligned on minimap (-0.05 bearing), white reticle (no red tint at 35m behind car)
+    white_aligned = _with_center_reticle(make_synthetic_minimap_frame(red_points=[(0.48, 0.35)]), (245, 245, 245))
+    win_backend = ReplayWindowBackend(lambda idx: white_aligned)
+    runner = ActionRunner(ctrl, win_backend, ScriptedHudOCR(lambda idx: {}), TelemetryLogger(tmp_path / "t.jsonl"), clock, clock.sleep)
+
+    res = runner.shoot_enemies(
+        max_shots=1,
+        empty_scans_to_stop=5,
+        config=LoopConfig(max_duration_s=3.0, hz=10.0, hud_check_interval_s=0.0),
+    )
+    assert res.stop_reason == "suppressive_shots_done"
+    assert ("mouse_down", "left") in backend.events
+    assert backend.currently_held_buttons == set()
