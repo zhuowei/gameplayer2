@@ -1,0 +1,214 @@
+from __future__ import annotations
+
+import signal
+from typing import Optional
+
+import pytest
+
+import gameplayer.input as gp_input
+from gameplayer.input import (
+    DryRunInputBackend,
+    InputController,
+    InputTimeoutError,
+    _release_all_active_controllers,
+    main as input_cli_main,
+)
+from gameplayer.telemetry import TelemetryLogger, read_telemetry
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, dt: float) -> None:
+        self.now += dt
+
+
+class FaultyReleaseBackend:
+    def __init__(self, fail_key_up: Optional[str] = None) -> None:
+        self.events: list[tuple[str, object]] = []
+        self.fail_key_up = fail_key_up
+
+    def key_down(self, key: str) -> None:
+        self.events.append(("key_down", key))
+
+    def key_up(self, key: str) -> None:
+        if key == self.fail_key_up:
+            raise RuntimeError(f"failed releasing {key}")
+        self.events.append(("key_up", key))
+
+    def mouse_down(self, button: str) -> None:
+        self.events.append(("mouse_down", button))
+
+    def mouse_up(self, button: str) -> None:
+        self.events.append(("mouse_up", button))
+
+    def mouse_move_delta(
+        self,
+        dx: int,
+        dy: int,
+        held_buttons: frozenset[str] = frozenset(),
+    ) -> None:
+        self.events.append(("mouse_delta", (dx, dy, sorted(held_buttons))))
+
+
+def test_tap_hold_click_and_mouse_delta_with_fake_clock(tmp_path) -> None:
+    clock = FakeClock()
+    backend = FaultyReleaseBackend()
+    logger = TelemetryLogger(tmp_path / "telemetry.jsonl")
+
+    with InputController(
+        backend=backend,
+        logger=logger,
+        clock=clock,
+        sleep_fn=clock.sleep,
+        register_signals=False,
+    ) as ctrl:
+        ctrl.tap("w", duration_s=0.05)
+        ctrl.click("left", duration_s=0.05)
+        ctrl.hold(keys=["w", "shift"], buttons=["right"], duration_s=0.2)
+        ctrl.mouse_delta(100, -50, steps=4, duration_s=0.08)
+
+        assert ctrl.held_keys == frozenset()
+        assert ctrl.held_buttons == frozenset()
+
+    assert ("key_down", "w") in backend.events
+    assert ("key_up", "w") in backend.events
+    assert ("key_down", "lshift") in backend.events
+    assert ("key_up", "lshift") in backend.events
+    assert ("mouse_down", "right") in backend.events
+    assert ("mouse_up", "right") in backend.events
+
+    deltas = [ev[1] for ev in backend.events if ev[0] == "mouse_delta"]
+    assert len(deltas) == 4
+    assert sum(d[0] for d in deltas) == 100
+    assert sum(d[1] for d in deltas) == -50
+
+
+def test_context_exit_releases_all_on_exception(tmp_path) -> None:
+    backend = FaultyReleaseBackend()
+    logger = TelemetryLogger(tmp_path / "telemetry.jsonl")
+
+    with pytest.raises(ValueError):
+        with InputController(backend=backend, logger=logger, register_signals=False) as ctrl:
+            ctrl.key_down("w")
+            ctrl.key_down("lshift")
+            ctrl.mouse_down("right")
+            assert ctrl.held_keys == frozenset({"w", "lshift"})
+            assert ctrl.held_buttons == frozenset({"right"})
+            raise ValueError("simulated crash")
+
+    assert ctrl.held_keys == frozenset()
+    assert ctrl.held_buttons == frozenset()
+    assert ("key_up", "w") in backend.events
+    assert ("key_up", "lshift") in backend.events
+    assert ("mouse_up", "right") in backend.events
+
+
+def test_run_sequence_releases_all_on_invalid_step_and_tracks_held_drag(tmp_path) -> None:
+    clock = FakeClock()
+    backend = FaultyReleaseBackend()
+    logger = TelemetryLogger(tmp_path / "telemetry.jsonl")
+    ctrl = InputController(
+        backend=backend,
+        logger=logger,
+        clock=clock,
+        sleep_fn=clock.sleep,
+        register_signals=False,
+    )
+
+    executed = ctrl.run_sequence(
+        [
+            {"action": "mouse_down", "button": "right"},
+            {"action": "mouse_delta", "dx": 20, "dy": 10, "steps": 2, "duration_s": 0.02},
+            {"action": "mouse_up", "button": "right"},
+        ]
+    )
+    assert executed == 3
+    deltas = [ev[1] for ev in backend.events if ev[0] == "mouse_delta"]
+    assert all(d[2] == ["right"] for d in deltas)
+
+    with pytest.raises(ValueError):
+        ctrl.run_sequence(
+            [
+                {"action": "key_down", "key": "w"},
+                {"action": "mouse_down", "button": "left"},
+                {"action": "bogus_action"},
+            ]
+        )
+
+    assert ctrl.held_keys == frozenset()
+    assert ctrl.held_buttons == frozenset()
+    assert ("key_up", "w") in backend.events
+    assert ("mouse_up", "left") in backend.events
+
+
+def test_release_all_continues_when_one_key_release_fails(tmp_path) -> None:
+    backend = FaultyReleaseBackend(fail_key_up="w")
+    logger = TelemetryLogger(tmp_path / "telemetry.jsonl")
+    ctrl = InputController(backend=backend, logger=logger, register_signals=False)
+    ctrl.key_down("w")
+    ctrl.key_down("d")
+    ctrl.mouse_down("left")
+
+    with pytest.raises(RuntimeError):
+        ctrl.release_all(reason="test_partial_fail", suppress_errors=False)
+
+    assert ctrl.held_keys == frozenset()
+    assert ctrl.held_buttons == frozenset()
+    assert ("key_up", "d") in backend.events
+    assert ("mouse_up", "left") in backend.events
+
+
+def test_hard_timeout_watchdog_releases_all_held_inputs(tmp_path) -> None:
+    backend = FaultyReleaseBackend()
+    logger = TelemetryLogger(tmp_path / "telemetry.jsonl")
+    ctrl = InputController(backend=backend, logger=logger, register_signals=False)
+
+    with pytest.raises(InputTimeoutError):
+        ctrl.hold(keys=["w", "space"], buttons=["left"], duration_s=2.0, timeout_s=0.05)
+
+    assert ctrl.held_keys == frozenset()
+    assert ctrl.held_buttons == frozenset()
+    assert ("key_up", "w") in backend.events
+    assert ("key_up", "space") in backend.events
+    assert ("mouse_up", "left") in backend.events
+
+    records = read_telemetry(tmp_path / "telemetry.jsonl", tool="input")
+    assert any(
+        r["action"] == "release_all" and "timeout_watchdog" in str(r.get("details", {}).get("reason", ""))
+        for r in records
+    )
+
+
+def test_atexit_and_signal_cleanup_release_active_controllers(tmp_path, monkeypatch) -> None:
+    backend = FaultyReleaseBackend()
+    logger = TelemetryLogger(tmp_path / "telemetry.jsonl")
+    ctrl = InputController(backend=backend, logger=logger, register_signals=False)
+    ctrl.key_down("a")
+    ctrl.mouse_down("right")
+
+    _release_all_active_controllers("atexit")
+    assert ctrl.held_keys == frozenset()
+    assert ctrl.held_buttons == frozenset()
+
+    ctrl.key_down("s")
+    prev_called: list[int] = []
+    monkeypatch.setitem(gp_input._PREV_SIGNAL_HANDLERS, signal.SIGTERM, lambda sig, frm: prev_called.append(sig))
+    gp_input._signal_handler(signal.SIGTERM, None)
+    assert prev_called == [signal.SIGTERM]
+    assert ctrl.held_keys == frozenset()
+    assert ("key_up", "s") in backend.events
+
+
+def test_cli_dry_run_mode(tmp_path, capsys) -> None:
+    seq_file = tmp_path / "seq.json"
+    seq_file.write_text('[{"action": "tap", "key": "e", "duration_s": 0.01}]', encoding="utf-8")
+    rc = input_cli_main(["--dry-run", "sequence", str(seq_file)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "key_down" in out and "key_up" in out
+    assert isinstance(DryRunInputBackend(), DryRunInputBackend)

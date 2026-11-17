@@ -1,0 +1,111 @@
+# TOOLS.md — Gameplayer Runtime Toolkit & Usage Guide
+
+## Environment Setup
+
+```bash
+uv venv .venv
+uv pip install --python .venv/bin/python -e ".[dev]"
+```
+
+Run offline tests:
+
+```bash
+.venv/bin/pytest
+```
+
+---
+
+## 1. Window Discovery & Clean 16:9 Capture (`gameplayer.window`)
+
+Black-box window metadata discovery (`CGWindowListCopyWindowInfo`) and clean unobstructed window pixel capture (`CGWindowListCreateImage` with `kCGWindowListOptionIncludingWindow` and `kCGWindowImageBoundsIgnoreFraming`). Capturing does **not** focus or alter the game window.
+
+### CLI Usage
+
+```bash
+# Read-only window metadata inspection (safe for any role)
+.venv/bin/python -m gameplayer.window --inspect
+
+# Capture clean unobstructed 16:9 PNG (safe for any role; does not focus)
+.venv/bin/python -m gameplayer.window --capture captures/frame.png
+.venv/bin/python -m gameplayer.window --capture captures/frame_640.png --width 640
+```
+
+### Python API
+
+- `find_game_window(...) -> WindowInfo`: matches `GTA5.exe` / `Grand Theft Auto V` (`layer == 0`, onscreen).
+- `capture_game_window(target_width=None, crop_titlebar=True, require_16_9=True) -> CaptureResult`:
+  - Normalizes aspect ratio to 16:9 (`normalize_to_16_9` crops top title bar if taller than 16:9, or horizontal center if wider).
+  - `.to_numpy()` returns `(H, W, 3)` `uint8` RGB array; `.save(path)` writes PNG.
+- `focus_game_window(..., allow_focus=True) -> WindowInfo`:
+  - **STRICT OWNERSHIP**: ONLY `player` may call `focus_game_window(..., allow_focus=True)`. Raises `PermissionError` if `allow_focus` is not explicitly `True`.
+
+---
+
+## 2. Fail-Safe Synthetic OS Input (`gameplayer.input`)
+
+Sends macOS Quartz `CGEvent` keyboard/mouse events (`CGEventInputBackend`) with deterministic offline testability (`DryRunInputBackend` / custom `InputBackend`).
+
+### Safety Guarantees
+
+- **Context Exit / Exception**: `with InputController(...) as ctrl:` calls `release_all()` in `__exit__`.
+- **Per-Action Cleanup**: `hold`, `tap`, `click`, and `run_sequence` wrap execution in `try/finally: release_all()`.
+- **Fault-Tolerant Release**: `release_all()` loops over every held key and mouse button individually so one backend error never prevents releasing the remaining inputs.
+- **Process Exit & Signals**: `atexit` and `SIGINT`/`SIGTERM` handlers release all held keys/buttons on active controllers before chaining prior handlers.
+- **Hard Timeout Watchdog**: Every timed action (`hold`, `tap`, `click`, `mouse_delta`, `run_sequence`) starts a `threading.Timer` watchdog (`default_timeout_s=10.0`, overrideable via `timeout_s` / `--timeout`). On expiration, the watchdog immediately calls `release_all()` and interrupts the action with `InputTimeoutError`.
+- **Live Opt-In**: CLI requires `--live` (vs `--dry-run`). **STRICT OWNERSHIP**: ONLY `player` may pass `--live` or instantiate `CGEventInputBackend`.
+
+### CLI Usage
+
+```bash
+# Offline dry-run (safe for verification)
+.venv/bin/python -m gameplayer.input --dry-run tap w
+.venv/bin/python -m gameplayer.input --dry-run hold --keys w lshift --duration 0.5
+.venv/bin/python -m gameplayer.input --dry-run mouse-delta 120 -20 --steps 6 --duration 0.1
+
+# Live game inputs (ONLY `player` may run --live)
+.venv/bin/python -m gameplayer.input --live --timeout 5.0 hold --keys w --duration 1.0
+.venv/bin/python -m gameplayer.input --live --timeout 10.0 sequence path/to/steps.json
+```
+
+### Python API (`InputController`)
+
+- `tap(key, duration_s=0.06, timeout_s=None)`
+- `click(button="left", duration_s=0.06, timeout_s=None)`
+- `hold(keys=(), buttons=(), duration_s=0.1, timeout_s=None)`
+- `mouse_delta(dx, dy, steps=1, duration_s=0.0, timeout_s=None)` (automatically uses `*MouseDragged` events when a mouse button is held)
+- `run_sequence(steps, timeout_s=None)`: executes a list of step dicts (`hold`, `tap`, `click`, `key_down`, `key_up`, `mouse_down`, `mouse_up`, `mouse_delta`, `wait`) in one local call.
+
+---
+
+## 3. Telemetry Logger (`gameplayer.telemetry`)
+
+Appends structured JSONL records to `logs/telemetry.jsonl` (configurable via `GAMEPLAYER_TELEMETRY_PATH`).
+
+- `TelemetryLogger.log(tool, action, status="ok", duration_ms=None, details=None, error=None)`
+- `TelemetryLogger.timed(tool, action, details=None)` context manager (records `ok`, `error`, or `timeout`)
+- `read_telemetry(path="logs/telemetry.jsonl", tool=None, limit=None)`
+
+---
+
+## 4. Rolling Video Capture Daemon & Slice Extractor (`gameplayer.capture_daemon`)
+
+Designed for `watcher` to continuously record clean, downscaled 16:9 game window segments without focusing the window, and extract 10–15s failure clips on demand.
+
+### CLI Usage
+
+```bash
+# Start rolling capture daemon (default: 640x360 @ 2.0 fps, 180s segments, keep newest 10)
+.venv/bin/python -m gameplayer.capture_daemon run
+
+# Check daemon status and completed segments
+.venv/bin/python -m gameplayer.capture_daemon status
+
+# Extract a 12s debug slice from a completed segment
+.venv/bin/python -m gameplayer.capture_daemon slice recordings/seg_XXXX.mp4 clips/debug.mp4 --start 45 --duration 12
+```
+
+### Guarantees
+
+- Encodes to `.in_progress_seg_*.mp4` and atomically renames to `seg_*.mp4` only after `ffmpeg` closes cleanly (`+faststart`), so readers never see truncated MP4 files.
+- Automatically prunes oldest segments beyond `--max-segments` (default `10`, ~30 minutes rolling window).
+- Skips transient `WindowNotFoundError` / `WindowCaptureError` frames cleanly and reports status in `logs/capture_daemon.json`.

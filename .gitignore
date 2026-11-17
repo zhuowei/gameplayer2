@@ -1,0 +1,54 @@
+# Media captures, recordings, screenshots, clips
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.bmp
+*.tiff
+recordings/
+captures/
+clips/
+screenshots/
+frames/
+
+# Logs, telemetry, and runtime artifacts
+logs/
+*.jsonl
+*.log
+tmp/
+temp/
+
+# Large model weights and cache files
+models/
+weights/
+checkpoints/
+*.onnx
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.gguf
+*.mlmodel
+*.mlpackage/
+
+# Python & test environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# macOS / editor metadata
+.DS_Store
