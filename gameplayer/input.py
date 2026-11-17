@@ -212,17 +212,8 @@ class CGEventInputBackend:
         self._quartz = Quartz
         self._target_pid = target_pid
         self._source = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
-        # Prevent macOS from dropping synthetic events during the 0.25s post-warp suppression window.
+        # Prevent macOS from dropping synthetic events after any boundary recenter.
         Quartz.CGEventSourceSetLocalEventsSuppressionInterval(self._source, 0.0)
-        for state in (
-            Quartz.kCGEventSuppressionStateSuppressionInterval,
-            Quartz.kCGEventSuppressionStateRemoteMouseDrag,
-        ):
-            Quartz.CGEventSourceSetLocalEventsFilterDuringSuppressionState(
-                self._source,
-                Quartz.kCGEventFilterMaskPermitAllEvents,
-                state,
-            )
         self._active_modifiers: set[str] = set()
         self._mod_flags = {
             "lshift": Quartz.kCGEventFlagMaskShift,
@@ -260,8 +251,8 @@ class CGEventInputBackend:
         bounds = q.CGDisplayBounds(q.CGMainDisplayID())
         cx = float(bounds.origin.x + bounds.size.width * 0.5)
         cy = float(bounds.origin.y + bounds.size.height * 0.5)
-        margin_x = max(120.0, float(bounds.size.width) * 0.18)
-        margin_y = max(80.0, float(bounds.size.height) * 0.18)
+        margin_x = max(200.0, float(bounds.size.width) * 0.26)
+        margin_y = max(120.0, float(bounds.size.height) * 0.26)
         nx = float(pos.x) + dx
         ny = float(pos.y) + dy
         if (

@@ -357,7 +357,6 @@ def test_cgevent_backend_warps_cursor_back_to_center_when_offscreen(monkeypatch)
     backend = gp_input.CGEventInputBackend()
     backend.mouse_move_delta(-67, 0, held_buttons=frozenset({"right"}))
     assert fake_q.suppression_interval == 0.0
-    assert len(fake_q.filters) == 2
     assert warped == [(960.0, 540.0)]
     assert fake_q.last_posted["pos"] == (893.0, 540.0)
     assert fake_q.last_posted[fake_q.kCGMouseEventDeltaX] == -67

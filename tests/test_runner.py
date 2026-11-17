@@ -222,10 +222,12 @@ def test_combat_burst_scan_keeps_aim_held_while_firing_and_stops_when_clear(tmp_
     assert ("mouse_down", "right") in backend.events
     assert ("mouse_down", "left") in backend.events
     assert ("mouse_up", "left") in backend.events
-    # Ensure right-click aim was only released at the very end, not dropped mid-burst
-    right_ups = [i for i, ev in enumerate(backend.events) if ev == ("mouse_up", "right")]
+    # Ensure right-click aim stayed held across firing burst (only released during coarse turn prior to burst, and at end)
+    left_down_idx = backend.events.index(("mouse_down", "left"))
     left_up_idx = backend.events.index(("mouse_up", "left"))
-    assert len(right_ups) == 1 and right_ups[0] > left_up_idx
+    right_ups = [i for i, ev in enumerate(backend.events) if ev == ("mouse_up", "right")]
+    assert right_ups[-1] > left_up_idx
+    assert not any(left_down_idx <= i <= left_up_idx for i in right_ups)
     assert backend.currently_held_buttons == set()
 
 

@@ -496,16 +496,30 @@ class ActionRunner:
         finally:
             self.input.key_up(key)
 
-    def _steer_camera(self, dx: int, dy: int) -> None:
-        """Emit smooth multi-step relative mouse deltas so Wine/DirectInput never drops large jumps."""
+    def _steer_camera(
+        self,
+        dx: int,
+        dy: int,
+        release_aim_button: Optional[str] = None,
+    ) -> None:
+        """Emit smooth ~15ms/step mouse deltas, temporarily releasing aim so free-look MouseMoved turns reliably."""
         mag = max(abs(dx), abs(dy))
         if mag == 0:
             return
-        if mag > 28:
-            steps = max(2, min(6, mag // 20))
-            self.input.mouse_delta(dx, dy, steps=steps, duration_s=0.015)
-        else:
-            self.input.mouse_delta(dx, dy, steps=1, duration_s=0.0)
+        repress_aim = False
+        if release_aim_button and release_aim_button in self.input.held_buttons:
+            self.input.mouse_up(release_aim_button)
+            repress_aim = True
+        try:
+            if mag > 20:
+                steps = max(3, min(8, mag // 18))
+                dur = max(0.05, steps * 0.015)
+                self.input.mouse_delta(dx, dy, steps=steps, duration_s=dur)
+            else:
+                self.input.mouse_delta(dx, dy, steps=2, duration_s=0.03)
+        finally:
+            if repress_aim and release_aim_button:
+                self.input.mouse_down(release_aim_button)
 
     def _fire_bursts(self, fire_button: str, bursts: int = 1, hold_s: float = 0.03, gap_s: float = 0.03) -> None:
         for idx in range(max(1, bursts)):
@@ -560,7 +574,7 @@ class ActionRunner:
             if abs(enemy.bearing) > align_threshold:
                 dx = int(round(max(-240.0, min(240.0, enemy.bearing * steer_gain))))
                 if dx != 0:
-                    self._steer_camera(dx, 0)
+                    self._steer_camera(dx, 0, release_aim_button=aim_button)
             else:
                 self._fire_bursts(fire_button, bursts=1, hold_s=0.03)
             return None
@@ -627,7 +641,7 @@ class ActionRunner:
                 aligned_without_lock_ticks = 0
                 dx = int(round(max(-220.0, min(220.0, enemy.bearing * steer_gain))))
                 if dx != 0:
-                    self._steer_camera(dx, 0)
+                    self._steer_camera(dx, 0, release_aim_button=aim_button)
                     if abs(dx) >= 30:
                         sweep_idx = 0
                 return None
@@ -667,7 +681,7 @@ class ActionRunner:
                 dx, dy = scan_pattern[sweep_idx % len(scan_pattern)]
                 sweep_idx += 1
                 if dx != 0 or dy != 0:
-                    self.input.mouse_delta(dx, dy, steps=1, duration_s=0.0)
+                    self.input.mouse_delta(dx, dy, steps=2, duration_s=0.03)
             return None
 
         return self._run_loop(
@@ -889,7 +903,7 @@ class ActionRunner:
                     aligned_ticks = 0
                     dx = int(round(max(-220.0, min(220.0, enemy.bearing * steer_gain))))
                     if dx != 0:
-                        self._steer_camera(dx, 0)
+                        self._steer_camera(dx, 0, release_aim_button=aim_button if is_peeking else None)
                         if abs(dx) >= 30:
                             sweep_idx = 0
                     return None
@@ -921,7 +935,7 @@ class ActionRunner:
                 dx, dy = scan_pattern[sweep_idx % len(scan_pattern)]
                 sweep_idx += 1
                 if dx != 0 or dy != 0:
-                    self.input.mouse_delta(dx, dy, steps=1, duration_s=0.0)
+                    self.input.mouse_delta(dx, dy, steps=2, duration_s=0.03)
             return None
 
         return self._run_loop(
