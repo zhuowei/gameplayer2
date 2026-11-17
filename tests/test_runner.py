@@ -807,3 +807,102 @@ def test_follow_route_on_foot_and_shoot_enemies_snap_cover_on_health_drop(tmp_pa
     assert ("key_up", "q") in backend2.events
     assert backend2.currently_held_buttons == set()
     assert backend2.currently_held_keys == set()
+
+
+def test_advance_under_fire_alternates_move_engage_recover_and_stops_on_vehicle_prompt(tmp_path) -> None:
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    log_path = tmp_path / "t.jsonl"
+    logger = TelemetryLogger(log_path)
+    ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
+
+    f_move = make_synthetic_minimap_frame(
+        health_ratio=0.90,
+        special_ratio=0.80,
+        yellow_points=[(0.50, 0.25)],
+        blue_points=[(0.50, 0.70)],
+        red_points=[(0.50, 0.42)],
+    )
+    f_engage_red = _with_center_reticle(
+        make_synthetic_minimap_frame(
+            health_ratio=0.90,
+            special_ratio=0.60,
+            yellow_points=[(0.50, 0.25)],
+            blue_points=[(0.50, 0.70)],
+            red_points=[(0.50, 0.42)],
+        ),
+        (245, 30, 30),
+    )
+    f_low_hp = make_synthetic_minimap_frame(
+        health_ratio=0.30,
+        yellow_points=[(0.50, 0.25)],
+        blue_points=[(0.50, 0.70)],
+        red_points=[(0.50, 0.42)],
+    )
+    f_recovered = make_synthetic_minimap_frame(
+        health_ratio=0.75,
+        yellow_points=[(0.50, 0.25)],
+        blue_points=[(0.50, 0.70)],
+    )
+
+    def _frame(idx: int) -> Image.Image:
+        if idx < 4:
+            return f_move
+        if idx < 7:
+            return f_engage_red
+        if idx < 11:
+            return f_low_hp
+        return f_recovered
+
+    def _ocr(idx: int):
+        if idx >= 13:
+            return {"bottom_subtitle": [OcrLine("Get in the getaway vehicle.", 0.96, (0.2, 0.8, 0.6, 0.1))]}
+        return {}
+
+    runner = ActionRunner(ctrl, ReplayWindowBackend(_frame), ScriptedHudOCR(_ocr), logger, clock, clock.sleep)
+    res = runner.advance_under_fire(
+        move_phase_s=0.3,
+        engage_phase_s=0.5,
+        recover_wait_s=0.3,
+        config=LoopConfig(max_duration_s=5.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert res.stop_reason == "objective_prompt:get in"
+    assert ("key_down", "w") in backend.events
+    assert ("key_down", "capslock") in backend.events
+    assert ("mouse_down", "right") in backend.events
+    assert ("mouse_down", "left") in backend.events
+    assert ("key_down", "q") in backend.events
+    assert any(r.get("action") == "advance_recover" for r in read_telemetry(log_path, tool="runner"))
+    assert backend.currently_held_keys == set()
+    assert backend.currently_held_buttons == set()
+
+
+def test_advance_under_fire_tethers_to_blue_ally_and_stops_on_target_reached(tmp_path) -> None:
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    logger = TelemetryLogger(tmp_path / "t.jsonl")
+    ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
+
+    # Objective is right (0.75, 0.35) while blue ally is far left (0.20, 0.77) + crew-tether subtitle: must steer left to blue ally first, then arrive.
+    f_tether = make_synthetic_minimap_frame(
+        health_ratio=0.90,
+        yellow_points=[(0.75, 0.35)],
+        blue_points=[(0.20, 0.77)],
+    )
+    f_arrived = make_synthetic_minimap_frame(
+        health_ratio=0.90,
+        yellow_points=[(0.50, 0.74)],
+        blue_points=[(0.50, 0.70)],
+    )
+    frames = [f_tether, f_tether, f_tether, f_arrived]
+    ocr = ScriptedHudOCR(
+        lambda idx: {"bottom_subtitle": [OcrLine("Return to the crew.", 0.95, (0.2, 0.8, 0.6, 0.1))]} if idx < 2 else {}
+    )
+    runner = ActionRunner(ctrl, ReplayWindowBackend(lambda idx: frames[min(idx, len(frames) - 1)]), ocr, logger, clock, clock.sleep)
+    res = runner.advance_under_fire(
+        config=LoopConfig(max_duration_s=5.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert res.stop_reason == "target_reached"
+    assert any(ev[0] == "mouse_delta" and ev[1][0] < 0 for ev in backend.events)
+    assert backend.currently_held_keys == set()
+    assert backend.currently_held_buttons == set()

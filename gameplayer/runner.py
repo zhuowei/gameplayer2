@@ -378,6 +378,60 @@ class ActionRunner:
             self._sleep(dt)
             rem -= dt
 
+    def _perform_on_foot_sidestep(
+        self,
+        attempt: int,
+        last_bearing: float,
+        duration_s: float,
+        vault: bool,
+    ) -> None:
+        if last_bearing < -0.05:
+            sidestep_key = "a"
+        elif last_bearing > 0.05:
+            sidestep_key = "d"
+        else:
+            sidestep_key = "d" if attempt % 2 == 1 else "a"
+        self._logger.log(
+            tool="runner",
+            action="on_foot_stuck_recovery",
+            status="ok",
+            details={
+                "attempt": attempt,
+                "sidestep_key": sidestep_key,
+                "duration_s": duration_s,
+                "vault": vault,
+            },
+        )
+        self.input.key_down(sidestep_key)
+        try:
+            if vault:
+                self._tap_key_preserving_held("space", hold_s=0.06)
+            self._sleep_chunked(duration_s)
+        finally:
+            self.input.key_up(sidestep_key)
+
+    @staticmethod
+    def _resolve_route_target_and_bearing(
+        mm: MinimapObservation,
+        target_color: str,
+    ):
+        targets = mm.targets.get(target_color, ())
+        if targets:
+            target = targets[0]
+        elif target_color in ("yellow", "purple"):
+            target = mm.primary_objective
+        else:
+            target = None
+
+        bearing: Optional[float] = None
+        if target_color == "yellow" and mm.yellow_route_bearing is not None:
+            bearing = mm.yellow_route_bearing
+        elif target_color == "purple" and mm.purple_route_bearing is not None:
+            bearing = mm.purple_route_bearing
+        elif target is not None:
+            bearing = target.bearing
+        return target, bearing
+
     def follow_route_on_foot(
         self,
         sprint: bool = False,
@@ -404,39 +458,8 @@ class ActionRunner:
         last_bearing = 0.0
         recovery_count = 0
 
-        def _perform_on_foot_stuck_recovery() -> None:
-            nonlocal recovery_count, low_motion_elapsed_s, prev_gray
-            recovery_count += 1
-            if last_bearing < -0.05:
-                sidestep_key = "a"
-            elif last_bearing > 0.05:
-                sidestep_key = "d"
-            else:
-                sidestep_key = "d" if recovery_count % 2 == 1 else "a"
-
-            self._logger.log(
-                tool="runner",
-                action="on_foot_stuck_recovery",
-                status="ok",
-                details={
-                    "attempt": recovery_count,
-                    "sidestep_key": sidestep_key,
-                    "duration_s": unstuck_duration_s,
-                    "vault": vault_on_stuck,
-                },
-            )
-            self.input.key_down(sidestep_key)
-            try:
-                if vault_on_stuck:
-                    self._tap_key_preserving_held("space", hold_s=0.06)
-                self._sleep_chunked(unstuck_duration_s)
-            finally:
-                self.input.key_up(sidestep_key)
-            low_motion_elapsed_s = 0.0
-            prev_gray = None
-
         def _on_tick(state: FrameState) -> Optional[str]:
-            nonlocal prev_gray, last_motion_check_t, low_motion_elapsed_s, last_bearing
+            nonlocal prev_gray, last_motion_check_t, low_motion_elapsed_s, last_bearing, recovery_count
             if state.hud is not None and norm_keywords:
                 combined_hud = f"{state.hud.subtitle_or_objective} {state.hud.help_prompt}".lower()
                 for kw in norm_keywords:
@@ -444,24 +467,9 @@ class ActionRunner:
                         return f"subtitle_keyword:{kw}"
 
             mm = state.minimap
-            targets = mm.targets.get(target_color, ())
-            if targets:
-                target = targets[0]
-            elif target_color in ("yellow", "purple"):
-                target = mm.primary_objective
-            else:
-                target = None
-
+            target, bearing = self._resolve_route_target_and_bearing(mm, target_color)
             if target is not None and target.distance <= arrive_distance:
                 return "target_reached"
-
-            bearing: Optional[float] = None
-            if target_color == "yellow" and mm.yellow_route_bearing is not None:
-                bearing = mm.yellow_route_bearing
-            elif target_color == "purple" and mm.purple_route_bearing is not None:
-                bearing = mm.purple_route_bearing
-            elif target is not None:
-                bearing = target.bearing
 
             if bearing is not None:
                 last_bearing = bearing
@@ -479,7 +487,10 @@ class ActionRunner:
                 last_motion_check_t = state.elapsed_s
 
                 if low_motion_elapsed_s >= stuck_window_s and (cfg.max_duration_s - state.elapsed_s) > 0.25:
-                    _perform_on_foot_stuck_recovery()
+                    recovery_count += 1
+                    self._perform_on_foot_sidestep(recovery_count, last_bearing, unstuck_duration_s, vault_on_stuck)
+                    low_motion_elapsed_s = 0.0
+                    prev_gray = None
                     return None
 
             if bearing is not None and abs(bearing) > deadband:
@@ -511,6 +522,268 @@ class ActionRunner:
             steer_gain=steer_gain,
             stop_on_subtitle_keywords=(),
             config=config,
+        )
+
+    def advance_under_fire(
+        self,
+        sprint: bool = False,
+        target_color: str = "yellow",
+        arrive_distance: float = 0.08,
+        ally_tether_distance: float = 0.28,
+        move_phase_s: float = 2.2,
+        engage_phase_s: float = 3.2,
+        engage_distance: float = 0.65,
+        min_engage_health: float = 0.45,
+        recover_health: float = 0.40,
+        recover_wait_s: float = 2.5,
+        use_special: bool = True,
+        recoil_comp_dy: int = 4,
+        steer_gain: float = 160.0,
+        deadband: float = 0.06,
+        bearing_deadband: float = 0.10,
+        stop_on_subtitle_keywords: Sequence[str] = ("get in", "enter", "vehicle", "car"),
+        tether_subtitle_keywords: Sequence[str] = ("return to", "wait for", "stay with", "follow"),
+        enable_stuck_recovery: bool = True,
+        stuck_window_s: float = 1.5,
+        stuck_motion_threshold: float = 2.5,
+        unstuck_duration_s: float = 0.55,
+        vault_on_stuck: bool = True,
+        scan_pattern: Sequence[tuple[int, int]] = DEFAULT_RETICLE_SWEEP,
+        config: Optional[LoopConfig] = None,
+    ) -> LoopResult:
+        """Closed-loop shoot-and-move advance (up to ~30s) alternating move, engage, and cover-recover phases."""
+        base_cfg = config or LoopConfig(
+            max_duration_s=30.0,
+            hz=10.0,
+            hud_check_interval_s=0.25,
+            stop_on_banner=True,
+            stop_on_help_change=False,
+            stop_on_subtitle_change=False,
+            health_drop_threshold=None,
+        )
+        cfg = LoopConfig(
+            max_duration_s=base_cfg.max_duration_s,
+            hz=base_cfg.hz,
+            hud_check_interval_s=base_cfg.hud_check_interval_s,
+            stop_on_banner=base_cfg.stop_on_banner,
+            stop_on_help_change=False,
+            stop_on_subtitle_change=False,
+            health_drop_threshold=None,
+        )
+        norm_stop_kws = tuple(kw.strip().lower() for kw in stop_on_subtitle_keywords if kw.strip())
+        norm_tether_kws = tuple(kw.strip().lower() for kw in tether_subtitle_keywords if kw.strip())
+
+        phase = "move"
+        phase_end_t = move_phase_s
+        min_move_until_t = 0.0
+        engage_cooldown_until_t = 0.0
+        recover_cooldown_until_t = 0.0
+        tether_active_until_t = 0.0
+        special_triggered = False
+
+        prev_gray: Optional[np.ndarray] = None
+        last_motion_check_t: Optional[float] = None
+        low_motion_elapsed_s = 0.0
+        last_bearing = 0.0
+        recovery_count = 0
+
+        sweep_idx = 0
+        sweep_offset_x = 0
+        sweep_offset_y = 0
+        aligned_ticks = 0
+
+        def _set_key(key: str, want_down: bool) -> None:
+            is_down = key in self.input.held_keys
+            if want_down and not is_down:
+                self.input.key_down(key)
+            elif not want_down and is_down:
+                self.input.key_up(key)
+
+        def _set_movement(want_move: bool, use_sprint: bool = False) -> None:
+            _set_key("w", want_move)
+            _set_key("lshift", want_move and use_sprint)
+
+        def _recenter_sweep() -> None:
+            nonlocal sweep_idx, sweep_offset_x, sweep_offset_y
+            if sweep_offset_x != 0 or sweep_offset_y != 0:
+                self.input.mouse_delta(-sweep_offset_x, -sweep_offset_y, steps=2, duration_s=0.03)
+                sweep_offset_x = 0
+                sweep_offset_y = 0
+            sweep_idx = 0
+
+        def _set_aim(want_aim: bool) -> None:
+            is_aiming = "right" in self.input.held_buttons
+            if want_aim and not is_aiming:
+                self.input.mouse_down("right")
+            elif not want_aim and is_aiming:
+                _recenter_sweep()
+                self.input.mouse_up("right")
+
+        def _on_tick(state: FrameState) -> Optional[str]:
+            nonlocal phase, phase_end_t, min_move_until_t, engage_cooldown_until_t, recover_cooldown_until_t, tether_active_until_t, special_triggered, prev_gray, last_motion_check_t, low_motion_elapsed_s, last_bearing, recovery_count, sweep_idx, sweep_offset_x, sweep_offset_y, aligned_ticks
+            now_t = state.elapsed_s
+            mm = state.minimap
+
+            if state.hud is not None:
+                combined_hud = f"{state.hud.subtitle_or_objective} {state.hud.help_prompt}".lower()
+                for kw in norm_stop_kws:
+                    if kw in combined_hud:
+                        _set_aim(False)
+                        _set_movement(False)
+                        return f"objective_prompt:{kw}"
+                for kw in norm_tether_kws:
+                    if kw in combined_hud:
+                        tether_active_until_t = max(tether_active_until_t, now_t + 2.5)
+                        break
+
+            if use_special and not special_triggered and mm.minimap_visible and mm.special_ratio >= 0.20:
+                if mm.nearest_enemy is not None or mm.health_ratio < 0.85:
+                    self._tap_key_preserving_held("capslock", hold_s=0.08)
+                    special_triggered = True
+
+            # Low-health cover/recover phase
+            if (
+                phase != "recover"
+                and now_t >= recover_cooldown_until_t
+                and mm.minimap_visible
+                and mm.health_ratio < recover_health
+            ):
+                _set_aim(False)
+                _set_movement(False)
+                phase = "recover"
+                phase_end_t = now_t + recover_wait_s
+                recover_cooldown_until_t = phase_end_t + 3.0
+                low_motion_elapsed_s = 0.0
+                prev_gray = None
+                self._tap_key_preserving_held("q", hold_s=0.08)
+                self._logger.log(
+                    tool="runner",
+                    action="advance_recover",
+                    status="ok",
+                    details={"health_ratio": round(mm.health_ratio, 3), "wait_s": recover_wait_s},
+                )
+                return None
+
+            if phase == "recover":
+                if now_t < phase_end_t and (not mm.minimap_visible or mm.health_ratio < min_engage_health):
+                    return None
+                phase = "move"
+                phase_end_t = now_t + move_phase_s
+                min_move_until_t = now_t + move_phase_s
+                engage_cooldown_until_t = now_t + move_phase_s
+
+            target, route_bearing = self._resolve_route_target_and_bearing(mm, target_color)
+            if target is not None and target.distance <= arrive_distance:
+                _set_aim(False)
+                _set_movement(False)
+                return "target_reached"
+
+            blue_targets = mm.targets.get("blue", ())
+            blue_ally = blue_targets[0] if blue_targets else None
+            need_ally_tether = (now_t < tether_active_until_t) or (
+                blue_ally is not None and blue_ally.distance > ally_tether_distance
+            )
+            nav_bearing = blue_ally.bearing if (need_ally_tether and blue_ally is not None) else route_bearing
+
+            enemy = mm.nearest_enemy
+            can_engage = (
+                enemy is not None
+                and enemy.distance <= engage_distance
+                and (not mm.minimap_visible or mm.health_ratio >= min_engage_health)
+                and not need_ally_tether
+            )
+
+            if phase == "move" and can_engage and now_t >= min_move_until_t and now_t >= engage_cooldown_until_t:
+                _set_movement(False)
+                phase = "engage"
+                phase_end_t = now_t + engage_phase_s
+                aligned_ticks = 0
+                sweep_idx = 0
+                sweep_offset_x = 0
+                sweep_offset_y = 0
+                low_motion_elapsed_s = 0.0
+                prev_gray = None
+                _set_aim(True)
+            elif phase == "engage" and (
+                enemy is None or enemy.distance > engage_distance or need_ally_tether or now_t >= phase_end_t
+            ):
+                _set_aim(False)
+                phase = "move"
+                phase_end_t = now_t + move_phase_s
+                min_move_until_t = now_t + move_phase_s
+                engage_cooldown_until_t = now_t + move_phase_s
+                low_motion_elapsed_s = 0.0
+                prev_gray = None
+
+            if phase == "engage":
+                _set_movement(False)
+                _set_aim(True)
+                reticle = detect_red_reticle(state.capture.image)
+                if reticle.is_red:
+                    aligned_ticks = 0
+                    self._fire_bursts("left", bursts=3, hold_s=0.03, gap_s=0.025, reason="red_reticle")
+                    if recoil_comp_dy > 0:
+                        self.input.mouse_delta(0, int(recoil_comp_dy), steps=1, duration_s=0.01)
+                    return None
+
+                if enemy is not None:
+                    if abs(enemy.bearing) > bearing_deadband:
+                        dx = int(round(max(-220.0, min(220.0, enemy.bearing * 180.0))))
+                        if dx != 0:
+                            self._steer_camera(dx, 0)
+                    if abs(enemy.bearing) <= 0.30:
+                        aligned_ticks += 1
+                        if aligned_ticks % 3 == 0:
+                            self._fire_bursts("left", bursts=2, hold_s=0.03, gap_s=0.03, reason="suppressive")
+                            if recoil_comp_dy > 0:
+                                self.input.mouse_delta(0, int(recoil_comp_dy), steps=1, duration_s=0.01)
+                    else:
+                        aligned_ticks = 0
+
+                if scan_pattern:
+                    dx, dy = scan_pattern[sweep_idx % len(scan_pattern)]
+                    sweep_idx += 1
+                    if dx != 0 or dy != 0:
+                        self.input.mouse_delta(dx, dy, steps=2, duration_s=0.03)
+                        sweep_offset_x += dx
+                        sweep_offset_y += dy
+                return None
+
+            # Move phase
+            _set_aim(False)
+            _set_movement(True, use_sprint=(sprint and not need_ally_tether))
+            if nav_bearing is not None:
+                last_bearing = nav_bearing
+
+            if enable_stuck_recovery:
+                cur_gray = _road_gray_sample(state.capture.image)
+                if prev_gray is not None and last_motion_check_t is not None:
+                    dt = max(0.0, now_t - last_motion_check_t)
+                    motion = _road_motion_score(prev_gray, cur_gray)
+                    if motion < stuck_motion_threshold:
+                        low_motion_elapsed_s += dt
+                    else:
+                        low_motion_elapsed_s = 0.0
+                prev_gray = cur_gray
+                last_motion_check_t = now_t
+
+                if low_motion_elapsed_s >= stuck_window_s and (cfg.max_duration_s - now_t) > 0.25:
+                    recovery_count += 1
+                    self._perform_on_foot_sidestep(recovery_count, last_bearing, unstuck_duration_s, vault_on_stuck)
+                    low_motion_elapsed_s = 0.0
+                    prev_gray = None
+                    return None
+
+            if nav_bearing is not None and abs(nav_bearing) > deadband:
+                dx = int(round(max(-240.0, min(240.0, nav_bearing * steer_gain))))
+                if dx != 0:
+                    self._steer_camera(dx, 0)
+            return None
+
+        return self._run_loop(
+            mode_name="advance_under_fire",
+            config=cfg,
+            on_tick=_on_tick,
         )
 
     def follow_gps_drive(
