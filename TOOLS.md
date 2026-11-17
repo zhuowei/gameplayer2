@@ -163,7 +163,9 @@ Fast local ~8–12 Hz perception + control loops (`ActionRunner`) combining `cap
 - `combat_burst_scan(aim_button="right", fire_button="left", ...)`
 - `aim_until_red_reticle(...)` / `aim_and_shoot(...)` / `hostage_shot(...)`: holds aim (`right`), sweeps/steers until `detect_red_reticle()` detects hostile red reticle contrast at `(0.5, 0.5)`, and fires precision `left` bursts (strictly waits for red reticle).
 - `shoot_enemies(..., use_special=False)`: multi-target combat loop combining minimap bearing steering, red-reticle precision shots, periodic suppressive bursts when aligned on distant/covered enemies (`fallback_fire_on_aligned=True`), and periodic aim re-tap to pop out of cover / snap.
-- `cover_peek_combat(enter_cover=True, use_special=True, min_peek_health=0.45, ...)`: taps `q` to stay crouched in cover (including between LLM turns), triggers `capslock` special ability when `special_ratio >= 0.20`, peeks in `2s` bursts when `health_ratio >= 0.45`, and automatically ducks back into cover to heal when health drops low.
+- `cover_peek_combat(enter_cover=True, use_special=True, min_peek_health=0.45, heal_wait_s=3.5, exit_on_health_drop=False, stop_when_no_enemies=True, no_enemies_clear_s=1.5, ...)`:
+  - **Cover-toggle safety**: `q` is a toggle in GTA 5! Pass `enter_cover=False` when already crouched in cover so it does not stand out of cover.
+  - Triggers `capslock` special ability when `special_ratio >= 0.20`, peeks in `2s` bursts, automatically ducks/releases aim to regenerate for `heal_wait_s=3.5s` on `< min_peek_health` or rapid `>= 0.20` health drop and resumes peeking in-loop (instead of burning an LLM turn), and exits early as `"enemies_cleared"` once no red minimap blips appear for `1.5s`.
 - `switch_character(character, method="hotkey" | "wheel")`
 
 Automatically releases ALL held inputs in `finally` on `WASTED`/`BUSTED`/`MISSION_FAILED`/`MISSION_PASSED` banners, new `top_left_help` / subtitle changes, rapid `health_drop`, target reached, or `max_duration_s` timeout.

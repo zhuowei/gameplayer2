@@ -727,10 +727,15 @@ class ActionRunner:
         enter_cover: bool = True,
         use_special: bool = True,
         min_peek_health: float = 0.45,
+        rapid_drop_duck_threshold: float = 0.20,
+        heal_wait_s: float = 3.5,
+        duck_heal_s: Optional[float] = None,
+        exit_on_health_drop: bool = False,
         peek_burst_s: float = 2.0,
-        duck_heal_s: float = 1.2,
-        max_shots: int = 8,
-        empty_scans_to_stop: int = 12,
+        max_shots: Optional[int] = None,
+        stop_when_no_enemies: bool = True,
+        no_enemies_clear_s: float = 1.5,
+        empty_scans_to_stop: Optional[int] = None,
         aim_button: str = "right",
         fire_button: str = "left",
         steer_gain: float = 220.0,
@@ -739,12 +744,30 @@ class ActionRunner:
         scan_pattern: Sequence[tuple[int, int]] = DEFAULT_RETICLE_SWEEP,
         config: Optional[LoopConfig] = None,
     ) -> LoopResult:
-        """Cover-peek combat loop with automatic low-health ducking, special activation, and turn-gap cover."""
-        cfg = config or LoopConfig(
-            max_duration_s=10.0,
+        """Cover-peek combat loop with in-loop heal & resume, special ability, and early enemy-clear exit.
+
+        Note: `q` is a toggle in GTA 5. Pass `enter_cover=False` if already crouched in cover so
+        this loop does not accidentally stand out of cover.
+        """
+        eff_heal_wait_s = heal_wait_s if duck_heal_s is None else float(duck_heal_s)
+        base_cfg = config or LoopConfig(
+            max_duration_s=12.0,
             hz=10.0,
             hud_check_interval_s=0.25,
             health_drop_threshold=None,
+        )
+        cfg = LoopConfig(
+            max_duration_s=base_cfg.max_duration_s,
+            hz=base_cfg.hz,
+            hud_check_interval_s=base_cfg.hud_check_interval_s,
+            stop_on_banner=base_cfg.stop_on_banner,
+            stop_on_help_change=base_cfg.stop_on_help_change,
+            stop_on_subtitle_change=base_cfg.stop_on_subtitle_change,
+            health_drop_threshold=(
+                (base_cfg.health_drop_threshold if base_cfg.health_drop_threshold is not None else rapid_drop_duck_threshold)
+                if exit_on_health_drop
+                else None
+            ),
         )
         if enter_cover:
             self._tap_key_preserving_held("q", hold_s=0.08)
@@ -753,9 +776,12 @@ class ActionRunner:
         is_peeking = False
         peek_start_t = 0.0
         duck_until_t = 0.0
+        duck_logged = False
+        peak_health: Optional[float] = None
         sweep_idx = 0
         shots_fired = 0
         no_enemy_ticks = 0
+        no_enemy_since_t: Optional[float] = None
         aligned_ticks = 0
 
         def _set_peek(want_peek: bool, now_t: float) -> None:
@@ -771,7 +797,7 @@ class ActionRunner:
                 is_peeking = False
 
         def _on_tick(state: FrameState) -> Optional[str]:
-            nonlocal special_triggered, duck_until_t, sweep_idx, shots_fired, no_enemy_ticks, aligned_ticks
+            nonlocal special_triggered, duck_until_t, duck_logged, peak_health, sweep_idx, shots_fired, no_enemy_ticks, no_enemy_since_t, aligned_ticks
             mm = state.minimap
             now_t = state.elapsed_s
 
@@ -779,21 +805,30 @@ class ActionRunner:
                 self._tap_key_preserving_held("capslock", hold_s=0.08)
                 special_triggered = True
 
-            # Duck back into cover if health is below safe threshold
-            if mm.minimap_visible and mm.health_ratio < min_peek_health:
-                _set_peek(False, now_t)
-                duck_until_t = max(duck_until_t, now_t + duck_heal_s)
-                self._logger.log(
-                    tool="runner",
-                    action="cover_duck",
-                    status="ok",
-                    details={"health_ratio": round(mm.health_ratio, 3)},
-                )
-                return None
+            # Check in-loop heal/duck trigger (low HP or rapid drop while peeking)
+            if mm.minimap_visible:
+                if peak_health is None or mm.health_ratio > peak_health:
+                    peak_health = mm.health_ratio
+                rapid_drop = (peak_health - mm.health_ratio) >= rapid_drop_duck_threshold
+                if mm.health_ratio < min_peek_health or rapid_drop:
+                    _set_peek(False, now_t)
+                    duck_until_t = max(duck_until_t, now_t + eff_heal_wait_s)
+                    peak_health = mm.health_ratio
+                    if not duck_logged:
+                        duck_logged = True
+                        self._logger.log(
+                            tool="runner",
+                            action="cover_duck",
+                            status="ok",
+                            details={"health_ratio": round(mm.health_ratio, 3), "heal_wait_s": eff_heal_wait_s},
+                        )
+                    return None
 
             if now_t < duck_until_t:
                 _set_peek(False, now_t)
                 return None
+
+            duck_logged = False
 
             # Limit continuous exposure during peek bursts
             if is_peeking and (now_t - peek_start_t) >= peek_burst_s:
@@ -806,16 +841,18 @@ class ActionRunner:
             reticle = detect_red_reticle(state.capture.image)
             if reticle.is_red:
                 no_enemy_ticks = 0
+                no_enemy_since_t = None
                 aligned_ticks = 0
                 self._fire_bursts(fire_button, bursts=2, hold_s=0.03, gap_s=0.03)
                 shots_fired += 1
-                if shots_fired >= max_shots:
+                if max_shots is not None and shots_fired >= max_shots:
                     return "reticle_shots_done"
                 return None
 
             enemy = mm.nearest_enemy
             if enemy is not None and abs(enemy.bearing) > bearing_deadband:
                 no_enemy_ticks = 0
+                no_enemy_since_t = None
                 aligned_ticks = 0
                 dx = int(round(max(-220.0, min(220.0, enemy.bearing * steer_gain))))
                 if dx != 0:
@@ -826,16 +863,22 @@ class ActionRunner:
 
             if enemy is None:
                 no_enemy_ticks += 1
+                if no_enemy_since_t is None:
+                    no_enemy_since_t = now_t
                 aligned_ticks = 0
-                if no_enemy_ticks >= empty_scans_to_stop:
-                    return "enemies_cleared"
+                if stop_when_no_enemies:
+                    if empty_scans_to_stop is not None and no_enemy_ticks >= empty_scans_to_stop:
+                        return "enemies_cleared"
+                    if empty_scans_to_stop is None and (now_t - no_enemy_since_t) >= no_enemies_clear_s:
+                        return "enemies_cleared"
             else:
                 no_enemy_ticks = 0
+                no_enemy_since_t = None
                 aligned_ticks += 1
                 if aligned_ticks % 6 == 0:
                     self._fire_bursts(fire_button, bursts=2, hold_s=0.03, gap_s=0.03)
                     shots_fired += 1
-                    if shots_fired >= max_shots:
+                    if max_shots is not None and shots_fired >= max_shots:
                         return "suppressive_shots_done"
 
             if scan_pattern:

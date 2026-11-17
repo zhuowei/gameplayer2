@@ -355,6 +355,40 @@ def test_cover_peek_combat_enters_cover_activates_special_and_ducks_on_low_healt
     assert backend.currently_held_keys == set()
 
 
+def test_cover_peek_combat_in_loop_heal_resumes_then_clears_without_toggling_q_when_false(tmp_path) -> None:
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    ctrl = InputController(backend=backend, logger=TelemetryLogger(tmp_path / "t.jsonl"), clock=clock, sleep_fn=clock.sleep, register_signals=False)
+
+    # Rapid health drop from 0.90 -> 0.50 (above 0.45, but rapid drop >= 0.20) triggers in-loop duck/heal,
+    # even when caller passes LoopConfig(health_drop_threshold=0.20) with exit_on_health_drop=False,
+    # then resumes peeking and stops early via no_enemies_clear_s=0.25.
+    f_high = _with_center_reticle(make_synthetic_minimap_frame(health_ratio=0.90, red_points=[(0.50, 0.40)]), (245, 30, 30))
+    f_drop = make_synthetic_minimap_frame(health_ratio=0.50, red_points=[(0.50, 0.40)])
+    f_clear = make_synthetic_minimap_frame(health_ratio=0.55, red_points=[])
+    frames = [f_high, f_drop, f_drop, f_drop, f_clear, f_clear, f_clear, f_clear]
+
+    win_backend = ReplayWindowBackend(lambda idx: frames[min(idx, len(frames) - 1)])
+    runner = ActionRunner(ctrl, win_backend, ScriptedHudOCR(lambda idx: {}), TelemetryLogger(tmp_path / "t.jsonl"), clock, clock.sleep)
+
+    res = runner.cover_peek_combat(
+        enter_cover=False,
+        use_special=False,
+        min_peek_health=0.45,
+        rapid_drop_duck_threshold=0.20,
+        heal_wait_s=0.25,
+        exit_on_health_drop=False,
+        stop_when_no_enemies=True,
+        no_enemies_clear_s=0.25,
+        config=LoopConfig(max_duration_s=5.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=0.20),
+    )
+    assert res.stop_reason == "enemies_cleared"
+    assert ("key_down", "q") not in backend.events
+    # Duck released right-click on drop, then resumed peeking (2nd mouse_down right) before clearing
+    assert backend.events.count(("mouse_down", "right")) >= 2
+    assert backend.currently_held_buttons == set()
+
+
 def test_follow_gps_drive_stuck_recovery_and_moving_no_false_trigger(tmp_path) -> None:
     # 1) Stuck scenario: identical frames for > 1.5s triggers reverse ('s') + counter-steer
     clock = FakeClock()
