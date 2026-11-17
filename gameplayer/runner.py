@@ -569,7 +569,7 @@ class ActionRunner:
         recover_target_health: float = 0.50,
         recover_wait_s: float = 2.5,
         use_special: bool = True,
-        recoil_comp_dy: int = 0,
+        recoil_comp_dy: int = 1,
         aim_settle_s: float = 0.15,
         exposed_recover_drop_threshold: float = 0.04,
         steer_gain: float = 160.0,
@@ -932,11 +932,14 @@ class ActionRunner:
                     self._steer_camera(dx, 0)
             return None
 
-        result = self._run_loop(
-            mode_name="advance_under_fire",
-            config=cfg,
-            on_tick=_on_tick,
-        )
+        try:
+            result = self._run_loop(
+                mode_name="advance_under_fire",
+                config=cfg,
+                on_tick=_on_tick,
+            )
+        finally:
+            _recenter_sweep()
         if cover_on_timeout and result.stop_reason == "timeout" and phase != "recover":
             self._tap_key_preserving_held("q", hold_s=0.08)
             self._logger.log(
@@ -1394,7 +1397,7 @@ class ActionRunner:
         bearing_deadband: float = 0.025,
         suppressive_max_bearing: float = 0.12,
         aim_settle_s: float = 0.18,
-        recoil_comp_dy: int = 0,
+        recoil_comp_dy: int = 1,
         exposed_duck_drop_threshold: float = 0.12,
         flank_recovery_min_health: float = 0.55,
         max_unclamp_attempts: int = 1,
@@ -1714,8 +1717,11 @@ class ActionRunner:
                     sweep_offset_y += dy
             return None
 
-        return self._run_loop(
-            mode_name="cover_peek_combat",
-            config=cfg,
-            on_tick=_on_tick,
-        )
+        try:
+            return self._run_loop(
+                mode_name="cover_peek_combat",
+                config=cfg,
+                on_tick=_on_tick,
+            )
+        finally:
+            _recenter_sweep()
