@@ -3,11 +3,11 @@ from __future__ import annotations
 from typing import Callable
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from gameplayer.hud import OcrLine
 from gameplayer.input import InputController
-from gameplayer.runner import ActionRunner, LoopConfig
+from gameplayer.runner import ActionRunner, LoopConfig, detect_red_reticle
 from gameplayer.telemetry import TelemetryLogger
 from gameplayer.window import WindowBounds, WindowInfo
 from tests.test_minimap import make_synthetic_minimap_frame
@@ -226,4 +226,66 @@ def test_combat_burst_scan_keeps_aim_held_while_firing_and_stops_when_clear(tmp_
     right_ups = [i for i, ev in enumerate(backend.events) if ev == ("mouse_up", "right")]
     left_up_idx = backend.events.index(("mouse_up", "left"))
     assert len(right_ups) == 1 and right_ups[0] > left_up_idx
+    assert backend.currently_held_buttons == set()
+
+
+def _with_center_reticle(base: Image.Image, color: tuple[int, int, int]) -> Image.Image:
+    out = base.copy()
+    draw = ImageDraw.Draw(out)
+    cx, cy = out.width // 2, out.height // 2
+    draw.rectangle((cx - 45, cy - 45, cx + 45, cy + 45), fill=(215, 215, 215))
+    draw.ellipse((cx - 4, cy - 4, cx + 4, cy + 4), fill=color)
+    return out
+
+
+def test_detect_red_reticle_distinguishes_hostile_dot_from_white_and_red_wall() -> None:
+    base = Image.new("RGB", (1280, 720), (40, 40, 45))
+    red_reticle = _with_center_reticle(base, (240, 35, 35))
+    white_reticle = _with_center_reticle(base, (250, 250, 250))
+    uniform_red_wall = Image.new("RGB", (1280, 720), (210, 30, 30))
+
+    assert detect_red_reticle(red_reticle).is_red is True
+    assert detect_red_reticle(white_reticle).is_red is False
+    assert detect_red_reticle(uniform_red_wall).is_red is False
+
+
+def test_hostage_shot_sweeps_then_fires_on_red_reticle(tmp_path) -> None:
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    ctrl = InputController(backend=backend, logger=TelemetryLogger(tmp_path / "t.jsonl"), clock=clock, sleep_fn=clock.sleep, register_signals=False)
+
+    base = make_synthetic_minimap_frame(health_ratio=1.0)
+    white_frame = _with_center_reticle(base, (245, 245, 245))
+    red_frame = _with_center_reticle(base, (245, 30, 30))
+
+    win_backend = ReplayWindowBackend(lambda idx: red_frame if idx >= 2 else white_frame)
+    runner = ActionRunner(ctrl, win_backend, ScriptedHudOCR(lambda idx: {}), TelemetryLogger(tmp_path / "t.jsonl"), clock, clock.sleep)
+
+    res = runner.hostage_shot(bursts=2, config=LoopConfig(max_duration_s=4.0, hz=12.0, hud_check_interval_s=0.0))
+    assert res.stop_reason == "reticle_shot"
+    assert backend.events.count(("mouse_down", "left")) == 2
+    assert backend.events.count(("mouse_up", "left")) == 2
+    assert backend.currently_held_buttons == set()
+
+
+def test_shoot_enemies_steers_and_confirms_red_reticle(tmp_path) -> None:
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    ctrl = InputController(backend=backend, logger=TelemetryLogger(tmp_path / "t.jsonl"), clock=clock, sleep_fn=clock.sleep, register_signals=False)
+
+    f0 = _with_center_reticle(make_synthetic_minimap_frame(red_points=[(0.82, 0.45)]), (245, 245, 245))
+    f1 = _with_center_reticle(make_synthetic_minimap_frame(red_points=[(0.50, 0.45)]), (245, 30, 30))
+    f2 = _with_center_reticle(make_synthetic_minimap_frame(red_points=[]), (245, 245, 245))
+    frames = [f0, f1, f2, f2]
+
+    win_backend = ReplayWindowBackend(lambda idx: frames[min(idx, len(frames) - 1)])
+    runner = ActionRunner(ctrl, win_backend, ScriptedHudOCR(lambda idx: {}), TelemetryLogger(tmp_path / "t.jsonl"), clock, clock.sleep)
+
+    res = runner.shoot_enemies(
+        max_shots=3,
+        empty_scans_to_stop=2,
+        config=LoopConfig(max_duration_s=5.0, hz=10.0, hud_check_interval_s=0.0),
+    )
+    assert res.stop_reason == "enemies_cleared"
+    assert ("mouse_down", "left") in backend.events
     assert backend.currently_held_buttons == set()

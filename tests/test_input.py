@@ -212,3 +212,70 @@ def test_cli_dry_run_mode(tmp_path, capsys) -> None:
     out = capsys.readouterr().out
     assert "key_down" in out and "key_up" in out
     assert isinstance(DryRunInputBackend(), DryRunInputBackend)
+
+
+def test_required_macos_virtual_keycodes_match_hitoolbox() -> None:
+    expected = {
+        "f5": 0x60,
+        "f6": 0x61,
+        "f7": 0x62,
+        "f8": 0x64,
+        "tab": 0x30,
+        "q": 0x0C,
+        "r": 0x0F,
+        "f": 0x03,
+        "e": 0x0E,
+        "g": 0x05,
+        "c": 0x08,
+        "v": 0x09,
+        "lalt": 0x3A,
+        "lctrl": 0x3B,
+        "lshift": 0x38,
+        "capslock": 0x39,
+        "space": 0x31,
+        "enter": 0x24,
+        "escape": 0x35,
+        "left": 0x7B,
+        "right": 0x7C,
+        "down": 0x7D,
+        "up": 0x7E,
+    }
+    for name, code in expected.items():
+        assert gp_input.KEYCODES[name] == code
+
+
+def test_switch_character_hotkey_wheel_and_cli(tmp_path, capsys) -> None:
+    clock = FakeClock()
+    backend = FaultyReleaseBackend()
+    logger = TelemetryLogger(tmp_path / "telemetry.jsonl")
+    with InputController(
+        backend=backend,
+        logger=logger,
+        clock=clock,
+        sleep_fn=clock.sleep,
+        register_signals=False,
+    ) as ctrl:
+        ctrl.switch_character("trevor", method="hotkey")
+        ctrl.switch_character("michael", method="hotkey")
+        ctrl.switch_character("franklin", method="hotkey")
+        assert ("key_down", "f7") in backend.events
+        assert ("key_up", "f7") in backend.events
+        assert ("key_down", "f5") in backend.events
+        assert ("key_down", "f6") in backend.events
+
+        backend.events.clear()
+        ctrl.switch_character("trevor", method="wheel")
+        assert backend.events[0] == ("key_down", "lalt")
+        assert backend.events[-1] == ("key_up", "lalt")
+        deltas = [ev[1][0] for ev in backend.events if ev[0] == "mouse_delta"]
+        assert sum(deltas) == 60
+        assert ctrl.held_keys == frozenset()
+
+        backend.events.clear()
+        ctrl.switch_character("trevor", method="wheel_hold")
+        assert backend.events == [("key_down", "lalt"), ("key_up", "lalt")]
+        assert ctrl.held_keys == frozenset()
+
+    rc = input_cli_main(["--dry-run", "switch-character", "trevor", "--method", "wheel"])
+    assert rc == 0
+    assert "lalt" in capsys.readouterr().out

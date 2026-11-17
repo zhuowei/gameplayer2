@@ -87,12 +87,21 @@ def test_crop_hud_regions_normalizes_titlebar_and_all_regions() -> None:
         ("BUSTED", "BUSTED"),
         ("MISSION FAILED", "MISSION_FAILED"),
         ("MISSION PASSED", "MISSION_PASSED"),
+        ("miSSir- r.aiLed", "MISSION_FAILED"),
         ("NORTH YANKTON", None),
     ],
 )
 def test_classify_center_banner(raw_text: str, expected: Optional[str]) -> None:
     lines = [OcrLine(text=raw_text, confidence=0.9, bbox=(0.2, 0.4, 0.6, 0.2))]
     assert classify_center_banner(lines) == expected
+
+
+def test_classify_center_banner_pricedown_with_fail_subtitle() -> None:
+    lines = [
+        OcrLine(text="miSSir- r.aiLed", confidence=0.3, bbox=(0.19, 0.31, 0.62, 0.23)),
+        OcrLine(text="M. died.", confidence=0.5, bbox=(0.46, 0.57, 0.07, 0.04)),
+    ]
+    assert classify_center_banner(lines) == "MISSION_FAILED"
 
 
 def test_inspect_frame_with_mock_ocr_and_telemetry(tmp_path) -> None:

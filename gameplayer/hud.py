@@ -34,6 +34,16 @@ BANNER_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("MISSION_PASSED", ("MISSION PASSED",)),
 )
 
+FAIL_SUBTITLE_MARKERS: tuple[str, ...] = (
+    "DIED",
+    "WAS KILLED",
+    "WAS DESTROYED",
+    "ALERTED",
+    "ABANDONED",
+    "ESCAPED",
+    "SPOTTED",
+)
+
 
 @dataclass(frozen=True)
 class OcrLine:
@@ -192,6 +202,7 @@ def classify_center_banner(lines: Sequence[OcrLine]) -> Optional[str]:
     if joined:
         candidates.append(joined)
 
+    # Pass 1: exact keyword substring match across all banners first.
     for cand in candidates:
         if not cand:
             continue
@@ -199,10 +210,33 @@ def classify_center_banner(lines: Sequence[OcrLine]) -> Optional[str]:
             for kw in keywords:
                 if kw in cand:
                     return canonical
-                # Allow minor single-character OCR glitch on bold stylized banner fonts
+
+    # Pass 2: best fuzzy match on stylized Pricedown OCR output.
+    best_canonical: Optional[str] = None
+    best_score = 0.0
+    for cand in candidates:
+        if not cand:
+            continue
+        for canonical, keywords in BANNER_PATTERNS:
+            for kw in keywords:
+                if len(kw) >= 10:
+                    ratio = SequenceMatcher(None, cand, kw).ratio()
+                    if ratio >= 0.68 and ratio > best_score:
+                        best_score = ratio
+                        best_canonical = canonical
                 for word_or_span in (cand, *cand.split()):
-                    if len(kw) >= 6 and SequenceMatcher(None, word_or_span, kw).ratio() >= 0.83:
-                        return canonical
+                    if len(kw) >= 6:
+                        ratio = SequenceMatcher(None, word_or_span, kw).ratio()
+                        if ratio >= 0.80 and ratio > best_score:
+                            best_score = ratio
+                            best_canonical = canonical
+
+    if best_canonical is not None:
+        return best_canonical
+
+    # GTA 5's Pricedown "MISSION FAILED" often pairs with a clean subtitle like "M. died."
+    if any(marker in cand for cand in candidates for marker in FAIL_SUBTITLE_MARKERS):
+        return "MISSION_FAILED"
     return None
 
 

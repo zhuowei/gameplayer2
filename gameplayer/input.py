@@ -145,6 +145,20 @@ CANONICAL_KEY_ALIASES: dict[str, str] = {
 
 VALID_MOUSE_BUTTONS = frozenset({"left", "right", "middle"})
 
+CHARACTER_HOTKEYS: dict[str, str] = {
+    "michael": "f5",
+    "franklin": "f6",
+    "trevor": "f7",
+    "online": "f8",
+}
+
+CHARACTER_WHEEL_DELTAS: dict[str, tuple[int, int]] = {
+    "michael": (-60, 0),
+    "franklin": (0, -60),
+    "trevor": (60, 0),
+    "online": (0, 60),
+}
+
 
 class InputTimeoutError(TimeoutError):
     """Raised when an input action exceeds its hard timeout watchdog."""
@@ -534,6 +548,50 @@ class InputController:
         """Press and release a single mouse button."""
         self.hold(buttons=[button], duration_s=duration_s, timeout_s=timeout_s)
 
+    def switch_character(
+        self,
+        character: str,
+        method: str = "hotkey",
+        wheel_hold_s: float = 0.30,
+        timeout_s: Optional[float] = None,
+    ) -> None:
+        """Switch protagonist (`michael`, `franklin`, `trevor`, `online`) via F5-F8 hotkey, lalt+wheel, or wheel_hold."""
+        norm_char = character.strip().lower()
+        if norm_char not in CHARACTER_HOTKEYS:
+            raise ValueError(f"Unknown character {character!r}; expected one of {sorted(CHARACTER_HOTKEYS)}")
+
+        norm_method = method.strip().lower()
+        if norm_method == "hotkey":
+            self.hold(keys=[CHARACTER_HOTKEYS[norm_char]], duration_s=0.14, timeout_s=timeout_s)
+            return
+        if norm_method == "wheel_hold":
+            self.hold(keys=["lalt"], duration_s=wheel_hold_s, timeout_s=timeout_s)
+            return
+        if norm_method == "wheel":
+            dx, dy = CHARACTER_WHEEL_DELTAS[norm_char]
+            eff_timeout = self.default_timeout_s if timeout_s is None else float(timeout_s)
+            with self.logger.timed("input", "switch_character", {"character": norm_char, "method": "wheel"}):
+                with self._watchdog(eff_timeout, "switch_character") as abort_event:
+                    try:
+                        self.key_down("lalt")
+                        self._sleep_checked(wheel_hold_s, abort_event, "switch_character:hold", eff_timeout)
+                        self._emit_mouse_delta_steps(
+                            dx=dx,
+                            dy=dy,
+                            steps=3,
+                            duration_s=0.10,
+                            abort_event=abort_event,
+                            action_name="switch_character:wheel",
+                            timeout_s=eff_timeout,
+                        )
+                        self._sleep_checked(0.08, abort_event, "switch_character:settle", eff_timeout)
+                    finally:
+                        self.release_all(reason="switch_character_end", suppress_errors=True)
+            return
+        raise ValueError(
+            f"Unknown switch_character method {method!r}; expected 'hotkey', 'wheel', or 'wheel_hold'"
+        )
+
     def _emit_mouse_delta_steps(
         self,
         dx: int,
@@ -728,6 +786,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
     p_seq = sub.add_parser("sequence", help="Run a JSON sequence file")
     p_seq.add_argument("json_file", type=Path)
+
+    p_sw = sub.add_parser("switch-character", help="Switch character (michael/franklin/trevor/online)")
+    p_sw.add_argument("character", choices=sorted(CHARACTER_HOTKEYS))
+    p_sw.add_argument("--method", choices=("hotkey", "wheel", "wheel_hold"), default="hotkey")
     return parser
 
 
@@ -746,6 +808,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         elif args.cmd == "sequence":
             steps = json.loads(args.json_file.read_text(encoding="utf-8"))
             ctrl.run_sequence(steps, timeout_s=args.timeout)
+        elif args.cmd == "switch-character":
+            ctrl.switch_character(args.character, method=args.method, timeout_s=args.timeout)
 
     if isinstance(backend, DryRunInputBackend):
         print(json.dumps({"dry_run_events": backend.events}, indent=2))

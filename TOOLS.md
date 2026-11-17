@@ -74,6 +74,7 @@ Sends macOS Quartz `CGEvent` keyboard/mouse events (`CGEventInputBackend`) with 
 - `click(button="left", duration_s=0.06, timeout_s=None)`
 - `hold(keys=(), buttons=(), duration_s=0.1, timeout_s=None)`
 - `mouse_delta(dx, dy, steps=1, duration_s=0.0, timeout_s=None)` (automatically uses `*MouseDragged` events when a mouse button is held)
+- `switch_character(character, method="hotkey", wheel_hold_s=0.30, timeout_s=None)`: switches between `michael` (`f5`), `franklin` (`f6`), `trevor` (`f7`), `online` (`f8`), `method="wheel"` (`lalt` + small 60px `mouse_delta`), or `method="wheel_hold"` (holds `lalt` without mouse nudge when the target character is already pre-highlighted). Note: do NOT mix `key_down("lalt")` with `tap()`/`hold()` outside `run_sequence` because `hold()`/`tap()` enforces `release_all()` on completion; use `switch_character` or `run_sequence`.
 - `run_sequence(steps, timeout_s=None)`: executes a list of step dicts (`hold`, `tap`, `click`, `key_down`, `key_up`, `mouse_down`, `mouse_up`, `mouse_delta`, `wait`) in one local call.
 
 ---
@@ -160,5 +161,7 @@ Fast local ~8–12 Hz perception + control loops (`ActionRunner`) combining `cap
 - `follow_route_on_foot(sprint=False, target_color="yellow", ...)`
 - `follow_gps_drive(route_color="yellow", ...)`
 - `combat_burst_scan(aim_button="right", fire_button="left", ...)`
+- `aim_until_red_reticle(...)` / `hostage_shot(...)` / `shoot_enemies(...)`: holds aim (`right`), sweeps/steers until `detect_red_reticle()` detects hostile red reticle contrast at `(0.5, 0.5)`, and fires precision `left` bursts.
+- `switch_character(character, method="hotkey" | "wheel")`
 
 Automatically releases ALL held inputs in `finally` on `WASTED`/`BUSTED`/`MISSION_FAILED`/`MISSION_PASSED` banners, new `top_left_help` / subtitle changes, rapid `health_drop`, target reached, or `max_duration_s` timeout.

@@ -4,13 +4,86 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Callable, Iterable, Optional
+from typing import Callable, Iterable, Optional, Sequence
+
+import numpy as np
+from PIL import Image
 
 from gameplayer.hud import HudObservation, OCRBackend, inspect_frame
 from gameplayer.input import InputController
 from gameplayer.minimap import MinimapObservation, inspect_minimap
 from gameplayer.telemetry import TelemetryLogger, get_default_logger
 from gameplayer.window import CaptureResult, WindowBackend, capture_game_window
+
+
+DEFAULT_RETICLE_SWEEP: tuple[tuple[int, int], ...] = (
+    (0, 0),
+    (22, 0),
+    (-44, 0),
+    (22, -14),
+    (28, 0),
+    (-56, 0),
+    (28, 28),
+    (28, 0),
+    (-56, 0),
+    (28, -14),
+)
+
+
+@dataclass(frozen=True)
+class ReticleStatus:
+    is_red: bool
+    center_red_pixels: int
+    outer_red_fraction: float
+    contrast_score: float
+
+
+def detect_red_reticle(image: Image.Image) -> ReticleStatus:
+    """Detect GTA 5's hostile red reticle dot at screen center (0.5, 0.5) while rejecting ambient red walls."""
+    arr = np.asarray(image.convert("RGB"), dtype=np.int16)
+    h, w, _ = arr.shape
+    cx, cy = w // 2, h // 2
+    inner_rx = max(6, int(round(w * 0.008)))
+    inner_ry = max(6, int(round(h * 0.014)))
+    outer_rx = max(18, int(round(w * 0.032)))
+    outer_ry = max(18, int(round(h * 0.055)))
+
+    patch = arr[
+        max(0, cy - outer_ry) : min(h, cy + outer_ry + 1),
+        max(0, cx - outer_rx) : min(w, cx + outer_rx + 1),
+    ]
+    r = patch[:, :, 0]
+    g = patch[:, :, 1]
+    b = patch[:, :, 2]
+
+    red_excess = r - np.maximum(g, b)
+    red_mask = (r >= 180) & (g <= 95) & (b <= 95) & (red_excess >= 95)
+
+    py, px = patch.shape[0] // 2, patch.shape[1] // 2
+    inner_slice = (
+        slice(max(0, py - inner_ry), min(patch.shape[0], py + inner_ry + 1)),
+        slice(max(0, px - inner_rx), min(patch.shape[1], px + inner_rx + 1)),
+    )
+    inner_mask = red_mask[inner_slice]
+    inner_pixels = int(np.count_nonzero(inner_mask))
+
+    outer_mask = np.ones_like(red_mask, dtype=bool)
+    outer_mask[inner_slice] = False
+    outer_total = max(1, int(np.count_nonzero(outer_mask)))
+    outer_red_pixels = int(np.count_nonzero(red_mask & outer_mask))
+    outer_red_fraction = outer_red_pixels / outer_total
+
+    inner_mean_excess = float(np.mean(red_excess[inner_slice]))
+    outer_mean_excess = float(np.mean(red_excess[outer_mask]))
+    contrast_score = inner_mean_excess - outer_mean_excess
+
+    is_red = inner_pixels >= 3 and (contrast_score >= 18.0 or outer_red_fraction < 0.35)
+    return ReticleStatus(
+        is_red=is_red,
+        center_red_pixels=inner_pixels,
+        outer_red_fraction=outer_red_fraction,
+        contrast_score=contrast_score,
+    )
 
 
 @dataclass(frozen=True)
@@ -328,6 +401,31 @@ class ActionRunner:
             initial_keys=(throttle_key,),
         )
 
+    def _fire_bursts(self, fire_button: str, bursts: int = 1, hold_s: float = 0.03, gap_s: float = 0.03) -> None:
+        for idx in range(max(1, bursts)):
+            self.input.mouse_down(fire_button)
+            try:
+                self._sleep(hold_s)
+            finally:
+                self.input.mouse_up(fire_button)
+            if idx + 1 < bursts and gap_s > 0:
+                self._sleep(gap_s)
+
+    def switch_character(
+        self,
+        character: str,
+        method: str = "hotkey",
+        wheel_hold_s: float = 0.25,
+        timeout_s: Optional[float] = None,
+    ) -> None:
+        """Switch character (`michael`, `franklin`, `trevor`, `online`) via F5-F8 hotkey or lalt+wheel."""
+        self.input.switch_character(
+            character=character,
+            method=method,
+            wheel_hold_s=wheel_hold_s,
+            timeout_s=timeout_s,
+        )
+
     def combat_burst_scan(
         self,
         aim_button: str = "right",
@@ -358,11 +456,7 @@ class ActionRunner:
                 if dx != 0:
                     self.input.mouse_delta(dx, 0, steps=1, duration_s=0.0)
             else:
-                self.input.mouse_down(fire_button)
-                try:
-                    self._sleep(0.03)
-                finally:
-                    self.input.mouse_up(fire_button)
+                self._fire_bursts(fire_button, bursts=1, hold_s=0.03)
             return None
 
         return self._run_loop(
@@ -370,4 +464,114 @@ class ActionRunner:
             config=cfg,
             on_tick=_on_tick,
             initial_buttons=(aim_button,),
+        )
+
+    def aim_until_red_reticle(
+        self,
+        aim_button: str = "right",
+        fire_button: str = "left",
+        fire_on_lock: bool = True,
+        bursts: int = 2,
+        stop_on_shot: bool = True,
+        max_shots: int = 1,
+        steer_gain: float = 150.0,
+        scan_pattern: Sequence[tuple[int, int]] = DEFAULT_RETICLE_SWEEP,
+        empty_scans_to_stop: Optional[int] = None,
+        config: Optional[LoopConfig] = None,
+    ) -> LoopResult:
+        """Hold aim, sweep/steer until center reticle turns hostile red, and fire precision bursts."""
+        cfg = config or LoopConfig(max_duration_s=6.0, hz=12.0, hud_check_interval_s=0.25)
+        sweep_idx = 0
+        shots_fired = 0
+        no_enemy_ticks = 0
+
+        def _on_tick(state: FrameState) -> Optional[str]:
+            nonlocal sweep_idx, shots_fired, no_enemy_ticks
+            reticle = detect_red_reticle(state.capture.image)
+            if reticle.is_red:
+                no_enemy_ticks = 0
+                if fire_on_lock:
+                    self._fire_bursts(fire_button, bursts=bursts, hold_s=0.03, gap_s=0.03)
+                    shots_fired += 1
+                    if stop_on_shot or shots_fired >= max_shots:
+                        return "reticle_shot"
+                else:
+                    return "reticle_locked"
+                return None
+
+            enemy = state.minimap.nearest_enemy
+            if enemy is not None and abs(enemy.bearing) > 0.12:
+                no_enemy_ticks = 0
+                dx = int(round(max(-200.0, min(200.0, enemy.bearing * steer_gain))))
+                if dx != 0:
+                    self.input.mouse_delta(dx, 0, steps=1, duration_s=0.0)
+                return None
+
+            if enemy is None:
+                no_enemy_ticks += 1
+                if empty_scans_to_stop is not None and no_enemy_ticks >= empty_scans_to_stop:
+                    return "enemies_cleared"
+            else:
+                no_enemy_ticks = 0
+
+            if scan_pattern:
+                dx, dy = scan_pattern[sweep_idx % len(scan_pattern)]
+                sweep_idx += 1
+                if dx != 0 or dy != 0:
+                    self.input.mouse_delta(dx, dy, steps=1, duration_s=0.0)
+            return None
+
+        return self._run_loop(
+            mode_name="aim_until_red_reticle",
+            config=cfg,
+            on_tick=_on_tick,
+            initial_buttons=(aim_button,),
+        )
+
+    def aim_and_shoot(
+        self,
+        bursts: int = 2,
+        stop_on_shot: bool = True,
+        max_shots: int = 1,
+        config: Optional[LoopConfig] = None,
+    ) -> LoopResult:
+        """Alias for `aim_until_red_reticle` with fire-on-lock enabled."""
+        return self.aim_until_red_reticle(
+            fire_on_lock=True,
+            bursts=bursts,
+            stop_on_shot=stop_on_shot,
+            max_shots=max_shots,
+            config=config,
+        )
+
+    def hostage_shot(
+        self,
+        bursts: int = 2,
+        config: Optional[LoopConfig] = None,
+    ) -> LoopResult:
+        """Precision single-target reticle sweep & shot (e.g. Prologue hostage rescue)."""
+        cfg = config or LoopConfig(max_duration_s=5.0, hz=12.0, hud_check_interval_s=0.25)
+        return self.aim_until_red_reticle(
+            fire_on_lock=True,
+            bursts=bursts,
+            stop_on_shot=True,
+            max_shots=1,
+            config=cfg,
+        )
+
+    def shoot_enemies(
+        self,
+        max_shots: int = 8,
+        empty_scans_to_stop: int = 12,
+        config: Optional[LoopConfig] = None,
+    ) -> LoopResult:
+        """Multi-target combat loop combining minimap enemy steering with red-reticle confirmation."""
+        cfg = config or LoopConfig(max_duration_s=10.0, hz=10.0, hud_check_interval_s=0.25)
+        return self.aim_until_red_reticle(
+            fire_on_lock=True,
+            bursts=2,
+            stop_on_shot=False,
+            max_shots=max_shots,
+            empty_scans_to_stop=empty_scans_to_stop,
+            config=cfg,
         )
