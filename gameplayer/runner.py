@@ -174,6 +174,15 @@ class ActionRunner:
         self._clock = clock
         self._sleep = sleep_fn
 
+    def _snap_cover_on_health_drop(self, mode_name: str) -> None:
+        self._tap_key_preserving_held("q", hold_s=0.08)
+        self._logger.log(
+            tool="runner",
+            action="cover_on_health_drop",
+            status="ok",
+            details={"mode": mode_name},
+        )
+
     def _run_loop(
         self,
         mode_name: str,
@@ -181,6 +190,7 @@ class ActionRunner:
         on_tick: Callable[[FrameState], Optional[str]],
         initial_keys: Iterable[str] = (),
         initial_buttons: Iterable[str] = (),
+        on_health_drop: Optional[Callable[[], None]] = None,
     ) -> LoopResult:
         if config.hz <= 0:
             raise ValueError(f"config.hz must be positive, got {config.hz}")
@@ -291,6 +301,8 @@ class ActionRunner:
                         self._sleep(sleep_s)
             finally:
                 self.input.release_all(reason=f"runner:{stop_reason}", suppress_errors=True)
+                if stop_reason == "health_drop" and on_health_drop is not None:
+                    on_health_drop()
 
             total_elapsed = self._clock() - start_t
             details.update(
@@ -379,6 +391,7 @@ class ActionRunner:
         stuck_motion_threshold: float = 2.5,
         unstuck_duration_s: float = 0.55,
         vault_on_stuck: bool = True,
+        cover_on_health_drop: bool = True,
         config: Optional[LoopConfig] = None,
     ) -> LoopResult:
         """Walk/sprint toward minimap route/objective with crew-tether subtitle stop and obstacle recovery."""
@@ -480,6 +493,7 @@ class ActionRunner:
             config=cfg,
             on_tick=_on_tick,
             initial_keys=keys,
+            on_health_drop=(lambda: self._snap_cover_on_health_drop("follow_route_on_foot")) if cover_on_health_drop else None,
         )
 
     def follow_blue_ally(
@@ -739,6 +753,7 @@ class ActionRunner:
         fallback_fire_on_aligned: bool = False,
         fallback_fire_interval_ticks: int = 6,
         reacquire_aim_interval_ticks: Optional[int] = None,
+        cover_on_health_drop: bool = False,
         config: Optional[LoopConfig] = None,
     ) -> LoopResult:
         """Hold aim, sweep/steer until center reticle turns hostile red, and fire precision bursts.
@@ -842,6 +857,7 @@ class ActionRunner:
             config=cfg,
             on_tick=_on_tick,
             initial_buttons=(aim_button,),
+            on_health_drop=(lambda: self._snap_cover_on_health_drop("aim_until_red_reticle")) if cover_on_health_drop else None,
         )
 
     def aim_and_shoot(
@@ -882,6 +898,7 @@ class ActionRunner:
         empty_scans_to_stop: int = 12,
         fallback_fire_on_aligned: bool = True,
         use_special: bool = False,
+        cover_on_health_drop: bool = True,
         config: Optional[LoopConfig] = None,
     ) -> LoopResult:
         """Multi-target combat loop: red-reticle precision shots + aligned suppressive bursts."""
@@ -897,6 +914,7 @@ class ActionRunner:
             fallback_fire_on_aligned=fallback_fire_on_aligned,
             fallback_fire_interval_ticks=4,
             reacquire_aim_interval_ticks=18,
+            cover_on_health_drop=cover_on_health_drop,
             config=cfg,
         )
 
@@ -921,6 +939,8 @@ class ActionRunner:
         aim_settle_s: float = 0.18,
         recoil_comp_dy: int = 4,
         exposed_duck_drop_threshold: float = 0.12,
+        flank_recovery_min_health: float = 0.55,
+        max_unclamp_attempts: int = 1,
         scan_pattern: Sequence[tuple[int, int]] = DEFAULT_RETICLE_SWEEP,
         config: Optional[LoopConfig] = None,
     ) -> LoopResult:
@@ -970,6 +990,7 @@ class ActionRunner:
         steer_cadence_ticks = 0
         large_steer_ticks = 0
         clamped_ticks = 0
+        unclamp_attempts = 0
         last_clamped_bearing: Optional[float] = None
 
         def _recenter_sweep() -> None:
@@ -994,7 +1015,7 @@ class ActionRunner:
                 is_peeking = False
 
         def _on_tick(state: FrameState) -> Optional[str]:
-            nonlocal special_triggered, duck_until_t, duck_logged, duck_reason_heal, duck_start_health, peak_health, sweep_idx, sweep_offset_x, sweep_offset_y, shots_fired, no_enemy_ticks, no_enemy_since_t, aligned_ticks, steer_cadence_ticks, large_steer_ticks, clamped_ticks, last_clamped_bearing
+            nonlocal special_triggered, duck_until_t, duck_logged, duck_reason_heal, duck_start_health, peak_health, sweep_idx, sweep_offset_x, sweep_offset_y, shots_fired, no_enemy_ticks, no_enemy_since_t, aligned_ticks, steer_cadence_ticks, large_steer_ticks, clamped_ticks, unclamp_attempts, last_clamped_bearing
             mm = state.minimap
             now_t = state.elapsed_s
 
@@ -1099,7 +1120,7 @@ class ActionRunner:
                 no_enemy_ticks = 0
                 no_enemy_since_t = None
 
-                # Only treat as cover-clamped when target stays stuck genuinely outside cover FOV (> 0.45).
+                # Flanking / cover-clamped enemy (> 0.45): attempt free-look flank recovery if healthy, else tuck/abort.
                 if abs(enemy.bearing) > 0.45:
                     if (
                         last_clamped_bearing is not None
@@ -1110,14 +1131,44 @@ class ActionRunner:
                     else:
                         clamped_ticks = 1
                     last_clamped_bearing = enemy.bearing
-                    if clamped_ticks >= 8:
+
+                    if (
+                        clamped_ticks >= 6
+                        and unclamp_attempts < max_unclamp_attempts
+                        and (not mm.minimap_visible or mm.health_ratio >= flank_recovery_min_health)
+                    ):
+                        _set_peek(False, now_t)
+                        dx = int(round(max(-240.0, min(240.0, enemy.bearing * steer_gain))))
+                        if dx != 0:
+                            self._steer_camera(dx, 0)
+                        sidestep_key = "a" if enemy.bearing < 0 else "d"
+                        self._tap_key_preserving_held(sidestep_key, hold_s=0.18)
+                        unclamp_attempts += 1
+                        clamped_ticks = 0
+                        last_clamped_bearing = None
+                        aligned_ticks = 0
+                        self._logger.log(
+                            tool="runner",
+                            action="cover_flank_recovery",
+                            status="ok",
+                            details={
+                                "attempt": unclamp_attempts,
+                                "bearing": round(enemy.bearing, 3),
+                                "sidestep_key": sidestep_key,
+                                "dx": dx,
+                            },
+                        )
+                        return None
+
+                    abort_threshold = 3 if unclamp_attempts > 0 else 8
+                    if clamped_ticks >= abort_threshold:
                         self._logger.log(
                             tool="runner",
                             action="cover_clamped",
                             status="ok",
                             details={"bearing": round(enemy.bearing, 3)},
                         )
-                        _recenter_sweep()
+                        _set_peek(False, now_t)
                         return "cover_clamped"
                 else:
                     clamped_ticks = 0

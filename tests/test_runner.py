@@ -724,3 +724,83 @@ def test_follow_route_on_foot_stuck_recovery_and_moving_no_false_trigger(tmp_pat
     assert ("key_down", "d") not in backend2.events
     assert ("key_down", "space") not in backend2.events
     assert backend2.currently_held_keys == set()
+
+
+def test_cover_peek_combat_flank_recovery_turns_when_healthy_and_skips_when_low_hp(tmp_path) -> None:
+    # 1) Healthy (>= 0.55): flanking enemy (-0.50) triggers free-look turn + sidestep, then re-engages and clears.
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    log_path = tmp_path / "t.jsonl"
+    logger = TelemetryLogger(log_path)
+    ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
+
+    f_flank = make_synthetic_minimap_frame(health_ratio=0.85, red_points=[(0.10, 0.77)])
+    f_front = _with_center_reticle(make_synthetic_minimap_frame(health_ratio=0.85, red_points=[(0.50, 0.40)]), (245, 30, 30))
+    f_clear = make_synthetic_minimap_frame(health_ratio=0.85, red_points=[])
+    # 6 flank ticks trigger recovery on tick 5 -> tick 6 sees enemy ahead and shoots -> ticks 7..9 clear
+    frames = [f_flank] * 6 + [f_front] + [f_clear] * 3
+    runner = ActionRunner(ctrl, ReplayWindowBackend(lambda idx: frames[min(idx, len(frames) - 1)]), ScriptedHudOCR(lambda idx: {}), logger, clock, clock.sleep)
+
+    res = runner.cover_peek_combat(
+        enter_cover=False,
+        use_special=False,
+        no_enemies_clear_s=0.2,
+        config=LoopConfig(max_duration_s=5.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert res.stop_reason == "enemies_cleared"
+    assert ("key_down", "a") in backend.events
+    assert ("key_up", "a") in backend.events
+    assert ("mouse_down", "left") in backend.events
+    assert any(r.get("action") == "cover_flank_recovery" for r in read_telemetry(log_path, tool="runner"))
+    assert backend.currently_held_buttons == set()
+    assert backend.currently_held_keys == set()
+
+    # 2) Low health (< 0.55): does NOT step out exposed into flank fire; aborts cover_clamped safely.
+    clock2 = FakeClock()
+    backend2 = RecordingInputBackend()
+    ctrl2 = InputController(backend=backend2, logger=TelemetryLogger(tmp_path / "t2.jsonl"), clock=clock2, sleep_fn=clock2.sleep, register_signals=False)
+    f_low_flank = make_synthetic_minimap_frame(health_ratio=0.48, red_points=[(0.10, 0.77)])
+    runner2 = ActionRunner(ctrl2, ReplayWindowBackend(lambda idx: f_low_flank), ScriptedHudOCR(lambda idx: {}), TelemetryLogger(tmp_path / "t2.jsonl"), clock2, clock2.sleep)
+    res2 = runner2.cover_peek_combat(
+        enter_cover=False,
+        use_special=False,
+        min_peek_health=0.40,
+        flank_recovery_min_health=0.55,
+        config=LoopConfig(max_duration_s=5.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert res2.stop_reason == "cover_clamped"
+    assert ("key_down", "a") not in backend2.events
+    assert backend2.currently_held_buttons == set()
+
+
+def test_follow_route_on_foot_and_shoot_enemies_snap_cover_on_health_drop(tmp_path) -> None:
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    log_path = tmp_path / "t.jsonl"
+    logger = TelemetryLogger(log_path)
+    ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
+    frames = [
+        make_synthetic_minimap_frame(health_ratio=1.0, yellow_points=[(0.50, 0.30)]),
+        make_synthetic_minimap_frame(health_ratio=0.70, yellow_points=[(0.50, 0.30)]),
+    ]
+    runner = ActionRunner(ctrl, ReplayWindowBackend(lambda idx: frames[min(idx, len(frames) - 1)]), ScriptedHudOCR(lambda idx: {}), logger, clock, clock.sleep)
+    res = runner.follow_route_on_foot(config=LoopConfig(max_duration_s=3.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=0.15))
+    assert res.stop_reason == "health_drop"
+    assert ("key_down", "q") in backend.events
+    assert ("key_up", "q") in backend.events
+    assert backend.currently_held_keys == set()
+
+    clock2 = FakeClock()
+    backend2 = RecordingInputBackend()
+    ctrl2 = InputController(backend=backend2, logger=TelemetryLogger(tmp_path / "t2.jsonl"), clock=clock2, sleep_fn=clock2.sleep, register_signals=False)
+    frames2 = [
+        make_synthetic_minimap_frame(health_ratio=1.0, red_points=[(0.50, 0.40)]),
+        make_synthetic_minimap_frame(health_ratio=0.70, red_points=[(0.50, 0.40)]),
+    ]
+    runner2 = ActionRunner(ctrl2, ReplayWindowBackend(lambda idx: frames2[min(idx, len(frames2) - 1)]), ScriptedHudOCR(lambda idx: {}), TelemetryLogger(tmp_path / "t2.jsonl"), clock2, clock2.sleep)
+    res2 = runner2.shoot_enemies(config=LoopConfig(max_duration_s=3.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=0.15))
+    assert res2.stop_reason == "health_drop"
+    assert ("key_down", "q") in backend2.events
+    assert ("key_up", "q") in backend2.events
+    assert backend2.currently_held_buttons == set()
+    assert backend2.currently_held_keys == set()
