@@ -16,20 +16,22 @@ from gameplayer.telemetry import TelemetryLogger, get_default_logger
 from gameplayer.window import CaptureResult, WindowBackend, WindowInfo, capture_game_window, find_game_window
 
 
+# Horizon-centered bidirectional sweep for GTA 5 ADS/cover-peek: scans horizon -> car-window/torso -> crouched/car-door (+22/+44) -> standing/walk-lift (-24/-42) with exact zero net drift.
 DEFAULT_RETICLE_SWEEP: tuple[tuple[int, int], ...] = (
-    (0, -34),
-    (18, 0),
-    (-36, 0),
-    (18, -20),
-    (20, 0),
-    (-40, 0),
-    (20, -18),
-    (24, 0),
-    (-48, 0),
-    (24, 38),
-    (24, 0),
-    (-48, 0),
-    (24, 34),
+    (18, 0),     # cum=(+18,   0) horizon right
+    (-36, 0),    # cum=(-18,   0) horizon left
+    (18, 22),    # cum=(  0, +22) mid-range torso / car-window center
+    (20, 0),     # cum=(+20, +22) torso right
+    (-40, 0),    # cum=(-20, +22) torso left
+    (20, 22),    # cum=(  0, +44) crouched / car-door / downhill center
+    (24, 0),     # cum=(+24, +44) crouched right
+    (-48, 0),    # cum=(-24, +44) crouched left
+    (24, -68),   # cum=(  0, -24) standing head / slight walk-tilt lift
+    (20, 0),     # cum=(+20, -24) head right
+    (-40, 0),    # cum=(-20, -24) head left
+    (20, -18),   # cum=(  0, -42) fresh walk->ADS upward lift
+    (22, 0),     # cum=(+22, -42) elevated right
+    (-22, 42),   # cum=(  0,   0) exact reset
 )
 
 
@@ -39,10 +41,11 @@ class ReticleStatus:
     center_red_pixels: int
     outer_red_fraction: float
     contrast_score: float
+    is_visible: bool = True
 
 
 def detect_red_reticle(image: Image.Image) -> ReticleStatus:
-    """Detect GTA 5's hostile red reticle dot at screen center (0.5, 0.5) while rejecting ambient red walls."""
+    """Detect GTA 5's center reticle visibility and hostile red tint at screen center (0.5, 0.5)."""
     arr = np.asarray(image.convert("RGB"), dtype=np.int16)
     h, w, _ = arr.shape
     cx, cy = w // 2, h // 2
@@ -82,11 +85,26 @@ def detect_red_reticle(image: Image.Image) -> ReticleStatus:
         contrast_score = 0.0
 
     is_red = inner_pixels >= 2 and contrast_score >= 40.0 and outer_red_fraction < 0.25
+
+    lum = (r + g + b) // 3
+    max_c = np.maximum(r, np.maximum(g, b))
+    min_c = np.minimum(r, np.minimum(g, b))
+    outer_med = float(np.median(lum[outer_mask]))
+    outer_std = float(np.std(lum[outer_mask]))
+    white_dot = (
+        (min_c[inner_slice] >= 170)
+        & ((max_c[inner_slice] - min_c[inner_slice]) <= 28)
+        & ((lum[inner_slice] - outer_med) >= 18.0)
+    )
+    bright_glare = outer_med >= 185.0 and int(np.max(min_c[inner_slice])) >= 200
+    is_visible = bool(is_red or np.any(white_dot) or bright_glare or outer_std < 1.5)
+
     return ReticleStatus(
         is_red=is_red,
         center_red_pixels=inner_pixels,
         outer_red_fraction=outer_red_fraction,
         contrast_score=contrast_score,
+        is_visible=is_visible,
     )
 
 
@@ -619,7 +637,7 @@ class ActionRunner:
         recover_target_health: float = 0.45,
         recover_wait_s: float = 2.5,
         use_special: bool = True,
-        recoil_comp_dy: int = 1,
+        recoil_comp_dy: int = 2,
         aim_settle_s: float = 0.15,
         exposed_recover_drop_threshold: float = 0.04,
         steer_gain: float = 160.0,
@@ -704,6 +722,8 @@ class ActionRunner:
                 self.input.mouse_delta(-sweep_offset_x, -sweep_offset_y, steps=2, duration_s=0.03)
                 sweep_offset_x = 0
                 sweep_offset_y = 0
+                if "right" in self.input.held_buttons:
+                    self._sleep(0.02)
             sweep_idx = 0
 
         def _reset_motion_tracker() -> None:
@@ -980,9 +1000,9 @@ class ActionRunner:
                         now_t >= phase_end_t
                         and (not need_ally_tether)
                         and route_bearing is None
-                        and len(mm.targets["red"]) >= 2
                         and enemy is not None
                         and enemy.distance <= 0.32
+                        and (len(mm.targets["red"]) >= 2 or engage_red_hits == 0)
                     ):
                         target_idx += 1
                         no_lock_ticks = 0
@@ -992,9 +1012,9 @@ class ActionRunner:
                             self._perform_on_foot_sidestep(recovery_count, enemy.bearing, 0.35, False)
                             _enter_engage_phase()
                             return None
-                        # Zero red_reticle locks across engage window (e.g. blocked behind Bobcat truck/wall): flank consistently around obstacle.
+                        # Zero red_reticle locks across engage window (e.g. blocked behind Bobcat truck/wall): commit 4 streaks per side around obstacle.
                         blocked_flank_streak += 1
-                        flank_key = "d" if ((blocked_flank_streak - 1) // 2) % 2 == 0 else "a"
+                        flank_key = "d" if ((blocked_flank_streak - 1) // 4) % 2 == 0 else "a"
                         self._logger.log(
                             tool="runner",
                             action="advance_flank_unblock",
@@ -1008,12 +1028,12 @@ class ActionRunner:
                             self.input.key_up("s")
                         self.input.key_down(flank_key)
                         try:
-                            self._sleep_chunked(0.55)
+                            self._sleep_chunked(0.70)
                         finally:
                             self.input.key_up(flank_key)
                         self._steer_camera(-80 if flank_key == "a" else 80, 0)
                         flank_move_s = min(move_phase_s, 0.65)
-                        flank_unblock_until_t = now_t + 0.75 + flank_move_s
+                        flank_unblock_until_t = now_t + 0.90 + flank_move_s
                         phase = "move"
                         phase_end_t = flank_unblock_until_t
                         min_move_until_t = flank_unblock_until_t
@@ -1037,7 +1057,7 @@ class ActionRunner:
                     blocked_flank_streak = 0
                     self._fire_bursts("left", bursts=3, hold_s=0.03, gap_s=0.025, reason="red_reticle")
                     if recoil_comp_dy > 0:
-                        self.input.mouse_delta(0, int(recoil_comp_dy), steps=1, duration_s=0.01)
+                        self.input.mouse_delta(0, int(recoil_comp_dy) * 3, steps=1, duration_s=0.01)
                     return None
 
                 if enemy is not None:
@@ -1055,6 +1075,8 @@ class ActionRunner:
                         aligned_ticks += 1
                         if no_lock_ticks in (6, 12):
                             self._fire_bursts("left", bursts=2, hold_s=0.03, gap_s=0.03, reason="suppressive")
+                            if recoil_comp_dy > 0:
+                                self.input.mouse_delta(0, int(recoil_comp_dy) * 2, steps=1, duration_s=0.01)
                     else:
                         aligned_ticks = 0
 
@@ -1374,6 +1396,7 @@ class ActionRunner:
         fallback_fire_interval_ticks: int = 6,
         fallback_fire_max_bearing: float = 0.08,
         reacquire_aim_interval_ticks: Optional[int] = None,
+        recoil_comp_dy: int = 2,
         cover_on_health_drop: bool = False,
         config: Optional[LoopConfig] = None,
     ) -> LoopResult:
@@ -1403,7 +1426,10 @@ class ActionRunner:
                 aligned_without_lock_ticks = 0
                 consecutive_steer_ticks = 0
                 if fire_on_lock:
+                    fire_bursts = max(1, bursts)
                     self._fire_bursts(fire_button, bursts=bursts, hold_s=0.03, gap_s=0.03)
+                    if recoil_comp_dy > 0:
+                        self.input.mouse_delta(0, int(recoil_comp_dy) * fire_bursts, steps=1, duration_s=0.01)
                     shots_fired += 1
                     if stop_on_shot or shots_fired >= max_shots:
                         return "reticle_shot"
@@ -1449,7 +1475,10 @@ class ActionRunner:
                     and fallback_fire_interval_ticks > 0
                     and aligned_without_lock_ticks % fallback_fire_interval_ticks == 0
                 ):
-                    self._fire_bursts(fire_button, bursts=max(1, bursts), hold_s=0.03, gap_s=0.03)
+                    fire_bursts = max(1, bursts)
+                    self._fire_bursts(fire_button, bursts=fire_bursts, hold_s=0.03, gap_s=0.03)
+                    if recoil_comp_dy > 0:
+                        self.input.mouse_delta(0, int(recoil_comp_dy) * fire_bursts, steps=1, duration_s=0.01)
                     shots_fired += 1
                     if shots_fired >= max_shots:
                         return "suppressive_shots_done"
@@ -1562,7 +1591,7 @@ class ActionRunner:
         bearing_deadband: float = 0.025,
         suppressive_max_bearing: float = 0.12,
         aim_settle_s: float = 0.18,
-        recoil_comp_dy: int = 1,
+        recoil_comp_dy: int = 2,
         exposed_duck_drop_threshold: float = 0.05,
         flank_recovery_min_health: float = 0.55,
         max_unclamp_attempts: int = 1,
@@ -1622,6 +1651,8 @@ class ActionRunner:
         toggled_cover_for_flank = False
         pre_flank_bearing: Optional[float] = None
         last_clamped_bearing: Optional[float] = None
+        no_reticle_ticks = 0
+        edge_shift_attempts = 0
 
         def _recenter_sweep() -> None:
             nonlocal sweep_idx, sweep_offset_x, sweep_offset_y
@@ -1629,10 +1660,12 @@ class ActionRunner:
                 self.input.mouse_delta(-sweep_offset_x, -sweep_offset_y, steps=2, duration_s=0.03)
                 sweep_offset_x = 0
                 sweep_offset_y = 0
+                if aim_button in self.input.held_buttons:
+                    self._sleep(0.02)
             sweep_idx = 0
 
         def _set_peek(want_peek: bool, now_t: float) -> None:
-            nonlocal is_peeking, peek_start_t
+            nonlocal is_peeking, peek_start_t, no_reticle_ticks
             if want_peek and not is_peeking:
                 self.input.mouse_down(aim_button)
                 is_peeking = True
@@ -1643,9 +1676,10 @@ class ActionRunner:
                 _recenter_sweep()
                 self.input.mouse_up(aim_button)
                 is_peeking = False
+                no_reticle_ticks = 0
 
         def _on_tick(state: FrameState) -> Optional[str]:
-            nonlocal special_triggered, duck_until_t, duck_logged, duck_reason_heal, duck_start_health, peak_health, sweep_idx, sweep_offset_x, sweep_offset_y, shots_fired, no_enemy_ticks, no_enemy_since_t, aligned_ticks, target_idx, no_lock_ticks, steer_cadence_ticks, large_steer_ticks, clamped_ticks, unclamp_attempts, flank_stage2_done, toggled_cover_for_flank, pre_flank_bearing, last_clamped_bearing
+            nonlocal special_triggered, duck_until_t, duck_logged, duck_reason_heal, duck_start_health, peak_health, sweep_idx, sweep_offset_x, sweep_offset_y, shots_fired, no_enemy_ticks, no_enemy_since_t, aligned_ticks, target_idx, no_lock_ticks, steer_cadence_ticks, large_steer_ticks, clamped_ticks, unclamp_attempts, flank_stage2_done, toggled_cover_for_flank, pre_flank_bearing, last_clamped_bearing, no_reticle_ticks, edge_shift_attempts
             mm = state.minimap
             now_t = state.elapsed_s
 
@@ -1715,6 +1749,8 @@ class ActionRunner:
             if reticle.is_red:
                 no_enemy_ticks = 0
                 no_enemy_since_t = None
+                no_reticle_ticks = 0
+                edge_shift_attempts = 0
                 aligned_ticks = 0
                 no_lock_ticks = 0
                 steer_cadence_ticks = 0
@@ -1723,7 +1759,7 @@ class ActionRunner:
                 last_clamped_bearing = None
                 self._fire_bursts(fire_button, bursts=3, hold_s=0.03, gap_s=0.025, reason="red_reticle")
                 if recoil_comp_dy > 0:
-                    self.input.mouse_delta(0, int(recoil_comp_dy), steps=1, duration_s=0.01)
+                    self.input.mouse_delta(0, int(recoil_comp_dy) * 3, steps=1, duration_s=0.01)
                 shots_fired += 1
                 if max_shots is not None and shots_fired >= max_shots:
                     _recenter_sweep()
@@ -1751,6 +1787,46 @@ class ActionRunner:
             else:
                 no_enemy_ticks = 0
                 no_enemy_since_t = None
+                if reticle.is_visible:
+                    no_reticle_ticks = 0
+                else:
+                    no_reticle_ticks += 1
+                    if no_reticle_ticks >= 6:
+                        if edge_shift_attempts >= 2:
+                            self._logger.log(
+                                tool="runner",
+                                action="cover_blocked",
+                                status="ok",
+                                details={
+                                    "edge_shift_attempts": edge_shift_attempts,
+                                    "bearing": round(enemy.bearing, 3),
+                                },
+                            )
+                            _set_peek(False, now_t)
+                            if toggled_cover_for_flank:
+                                self._tap_key_preserving_held("q", hold_s=0.08)
+                                toggled_cover_for_flank = False
+                            return "cover_blocked"
+                        edge_shift_attempts += 1
+                        preferred_key = "a" if enemy.bearing < 0 else "d"
+                        sidestep_key = preferred_key if edge_shift_attempts == 1 else ("d" if preferred_key == "a" else "a")
+                        _set_peek(False, now_t)
+                        self._tap_key_preserving_held(sidestep_key, hold_s=0.30)
+                        no_reticle_ticks = 0
+                        no_lock_ticks = 0
+                        aligned_ticks = 0
+                        self._logger.log(
+                            tool="runner",
+                            action="cover_edge_shift",
+                            status="ok",
+                            details={
+                                "attempt": edge_shift_attempts,
+                                "sidestep_key": sidestep_key,
+                                "bearing": round(enemy.bearing, 3),
+                            },
+                        )
+                        _set_peek(True, now_t)
+                        return None
 
                 # Flanking / cover-clamped enemy (> 0.45): 2-stage recovery (free-look+sidestep, then q cover-break + aim turn) if healthy.
                 if abs(enemy.bearing) > 0.45:
@@ -1864,22 +1940,27 @@ class ActionRunner:
                     steer_cadence_ticks = 0
                     large_steer_ticks = 0
 
-                if abs(enemy.bearing) <= 0.16 or steer_cadence_ticks >= 8:
-                    no_lock_ticks += 1
-                if no_lock_ticks >= 16:
-                    no_lock_ticks = 0
-                    target_idx += 1
-                    _recenter_sweep()
-                    return None
+                if reticle.is_visible:
+                    if abs(enemy.bearing) <= 0.16 or steer_cadence_ticks >= 8:
+                        no_lock_ticks += 1
+                    if no_lock_ticks >= 16:
+                        no_lock_ticks = 0
+                        target_idx += 1
+                        _recenter_sweep()
+                        return None
 
-                if abs(enemy.bearing) <= suppressive_max_bearing:
-                    aligned_ticks += 1
-                    if no_lock_ticks in (6, 12):
-                        self._fire_bursts(fire_button, bursts=2, hold_s=0.03, gap_s=0.03, reason="suppressive")
-                        shots_fired += 1
-                        if max_shots is not None and shots_fired >= max_shots:
-                            _recenter_sweep()
-                            return "suppressive_shots_done"
+                    if abs(enemy.bearing) <= suppressive_max_bearing:
+                        aligned_ticks += 1
+                        if no_lock_ticks in (6, 12):
+                            self._fire_bursts(fire_button, bursts=2, hold_s=0.03, gap_s=0.03, reason="suppressive")
+                            if recoil_comp_dy > 0:
+                                self.input.mouse_delta(0, int(recoil_comp_dy) * 2, steps=1, duration_s=0.01)
+                            shots_fired += 1
+                            if max_shots is not None and shots_fired >= max_shots:
+                                _recenter_sweep()
+                                return "suppressive_shots_done"
+                    else:
+                        aligned_ticks = 0
                 else:
                     aligned_ticks = 0
 

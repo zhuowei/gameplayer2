@@ -500,8 +500,9 @@ def test_default_reticle_sweep_zero_net_drift_and_scans_torso_heights() -> None:
     for _, dy in DEFAULT_RETICLE_SWEEP:
         cum_y += dy
         ys.append(cum_y)
-    assert min(ys) <= -60
-    assert max(ys) <= 15
+    assert min(ys) <= -40
+    assert max(ys) >= 40
+    assert 0 in ys
 
 
 def test_cover_peek_combat_keeps_aim_held_and_fires_suppressive_within_fov(tmp_path) -> None:
@@ -588,7 +589,7 @@ def test_cover_peek_combat_applies_downward_recoil_compensation(tmp_path) -> Non
     logger = TelemetryLogger(tmp_path / "t.jsonl")
     ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
 
-    # Recoil compensation applies ONLY on red_reticle bursts (not suppressive bursts, avoiding downward pitch drift into the floor).
+    # Recoil compensation applies recoil_comp_dy * bursts on BOTH suppressive (bursts=2 -> +8) and red_reticle (bursts=3 -> +12) bursts.
     f_neutral = _with_center_reticle(make_synthetic_minimap_frame(health_ratio=0.95, red_points=[(0.50, 0.40)]), (245, 245, 245))
     runner_sup = ActionRunner(ctrl, ReplayWindowBackend(lambda idx: f_neutral), ScriptedHudOCR(lambda idx: {}), logger, clock, clock.sleep)
     res_sup = runner_sup.cover_peek_combat(
@@ -600,7 +601,7 @@ def test_cover_peek_combat_applies_downward_recoil_compensation(tmp_path) -> Non
         config=LoopConfig(max_duration_s=4.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
     )
     assert res_sup.stop_reason == "suppressive_shots_done"
-    assert [ev[1] for ev in backend.events if ev[0] == "mouse_delta"] == []
+    assert [ev[1] for ev in backend.events if ev[0] == "mouse_delta"] == [(0, 8, ["right"]), (0, 8, ["right"])]
 
     clock2 = FakeClock()
     backend2 = RecordingInputBackend()
@@ -617,7 +618,7 @@ def test_cover_peek_combat_applies_downward_recoil_compensation(tmp_path) -> Non
         config=LoopConfig(max_duration_s=4.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
     )
     assert res_red.stop_reason == "reticle_shots_done"
-    assert [ev[1] for ev in backend2.events if ev[0] == "mouse_delta"] == [(0, 4, ["right"]), (0, 4, ["right"])]
+    assert [ev[1] for ev in backend2.events if ev[0] == "mouse_delta"] == [(0, 12, ["right"]), (0, 12, ["right"])]
     assert backend2.currently_held_buttons == set()
 
 
@@ -1001,7 +1002,7 @@ def test_ads_fine_steering_handles_small_bearing_and_calibrated_recoil_default(t
     backend = RecordingInputBackend()
     ctrl = InputController(backend=backend, logger=TelemetryLogger(tmp_path / "t.jsonl"), clock=clock, sleep_fn=clock.sleep, register_signals=False)
 
-    # Bearing ~0.05 produces fine dx steering and 0 downward drift on suppressive bursts.
+    # Bearing ~0.05 produces fine dx steering and calibrated downward recoil comp (+2 * 2 bursts = +4 per suppressive shot -> +8 for 2 shots).
     f_slight_right = _with_center_reticle(make_synthetic_minimap_frame(health_ratio=0.95, red_points=[(0.535, 0.45)]), (245, 245, 245))
     runner = ActionRunner(ctrl, ReplayWindowBackend(lambda idx: f_slight_right), ScriptedHudOCR(lambda idx: {}), TelemetryLogger(tmp_path / "t.jsonl"), clock, clock.sleep)
     res = runner.cover_peek_combat(
@@ -1016,9 +1017,9 @@ def test_ads_fine_steering_handles_small_bearing_and_calibrated_recoil_default(t
     dys = [ev[1][1] for ev in backend.events if ev[0] == "mouse_delta"]
     assert any(dx > 0 for dx in dxs)
     assert sum(dxs) >= 6
-    assert sum(dys) == 0
+    assert sum(dys) == 8
 
-    # On red_reticle bursts, default recoil_comp_dy=1 applies +1 dy per burst, while explicit recoil_comp_dy=0 produces 0.
+    # On red_reticle bursts (3 rounds per shot), default recoil_comp_dy=2 applies +6 dy per shot (+12 for 2 shots), while explicit recoil_comp_dy=0 produces 0.
     f_red = _with_center_reticle(make_synthetic_minimap_frame(health_ratio=0.95, red_points=[(0.50, 0.45)]), (245, 30, 30))
     clock_def = FakeClock()
     backend_def = RecordingInputBackend()
@@ -1032,7 +1033,7 @@ def test_ads_fine_steering_handles_small_bearing_and_calibrated_recoil_default(t
         config=LoopConfig(max_duration_s=3.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
     )
     assert res_def.stop_reason == "reticle_shots_done"
-    assert sum(ev[1][1] for ev in backend_def.events if ev[0] == "mouse_delta") == 2
+    assert sum(ev[1][1] for ev in backend_def.events if ev[0] == "mouse_delta") == 12
 
     # Explicit recoil_comp_dy=0 produces 0 net dy drift.
     clock2 = FakeClock()
@@ -1430,10 +1431,17 @@ def test_advance_under_fire_caps_hold_engage_and_resumes_move(tmp_path) -> None:
 
 
 def test_reticle_sweep_lifts_to_chest_height_on_tick_zero() -> None:
-    assert DEFAULT_RETICLE_SWEEP[0] == (0, -34)
-    assert len(DEFAULT_RETICLE_SWEEP) == 13
+    assert DEFAULT_RETICLE_SWEEP[0] == (18, 0)
+    assert len(DEFAULT_RETICLE_SWEEP) == 14
     assert sum(dx for dx, _ in DEFAULT_RETICLE_SWEEP) == 0
     assert sum(dy for _, dy in DEFAULT_RETICLE_SWEEP) == 0
+    cum_y = 0
+    ys = []
+    for _, dy in DEFAULT_RETICLE_SWEEP:
+        cum_y += dy
+        ys.append(cum_y)
+    assert any(y > 0 for y in ys) and max(ys) >= 40
+    assert any(y < 0 for y in ys) and min(ys) <= -40
 
 
 def test_multi_target_cycling_and_suppressive_cap_every_16_ticks(tmp_path) -> None:
@@ -1583,4 +1591,138 @@ def test_cover_peek_combat_steers_every_tick_above_008_bearing(tmp_path) -> None
     assert len(steer_dxs) >= 15
     assert all(dx > 0 for dx in steer_dxs[:4])
     assert backend.events.count(("mouse_up", "right")) == 1
+    assert backend.currently_held_buttons == set()
+
+
+def _with_textured_center_bg(image: Image.Image, c1: tuple[int, int, int] = (55, 55, 55), c2: tuple[int, int, int] = (95, 95, 95)) -> Image.Image:
+    out = image.copy()
+    draw = ImageDraw.Draw(out)
+    cx, cy = out.width // 2, out.height // 2
+    for row in range(cy - 45, cy + 46, 2):
+        draw.line([(cx - 45, row), (cx + 45, row)], fill=c1)
+        draw.line([(cx - 45, row + 1), (cx + 45, row + 1)], fill=c2)
+    return out
+
+
+def test_detect_reticle_visibility_on_textured_cover_vs_white_dot_and_glare() -> None:
+    base = make_synthetic_minimap_frame(health_ratio=0.95, red_points=[(0.50, 0.40)])
+    # Uniform frame keeps is_visible=True for synthetic unit tests
+    assert detect_red_reticle(base).is_visible is True
+
+    # Textured pillar surface with no reticle dot -> phantom peek (is_visible=False)
+    textured_blocked = _with_textured_center_bg(base)
+    assert detect_red_reticle(textured_blocked).is_red is False
+    assert detect_red_reticle(textured_blocked).is_visible is False
+
+    # Textured surface with GTA 5 Simple white reticle dot -> is_visible=True
+    textured_white = _with_center_reticle(textured_blocked, (224, 224, 224))
+    assert detect_red_reticle(textured_white).is_red is False
+    assert detect_red_reticle(textured_white).is_visible is True
+
+    # Bright sunlit glare with high-luminance dot -> is_visible=True
+    glare = _with_center_reticle(_with_textured_center_bg(base, (190, 190, 190), (210, 210, 210)), (224, 224, 224))
+    assert detect_red_reticle(glare).is_visible is True
+
+
+def test_cover_peek_combat_phantom_peek_suppresses_dry_fire_edge_shifts_and_aborts_cover_blocked(tmp_path) -> None:
+    # 1) Enemy slightly left (-0.09 bearing) behind solid pillar center (is_visible=False):
+    #    must fire 0 suppressive bursts, run cover_edge_shift ('a' then 'd', hold_s=0.30), then abort "cover_blocked".
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    log_path = tmp_path / "t_blocked.jsonl"
+    logger = TelemetryLogger(log_path)
+    ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
+    f_blocked_left = _with_textured_center_bg(make_synthetic_minimap_frame(health_ratio=0.95, red_points=[(0.44, 0.45)]))
+    runner = ActionRunner(ctrl, ReplayWindowBackend(lambda idx: f_blocked_left), ScriptedHudOCR(lambda idx: {}), logger, clock, clock.sleep)
+    res = runner.cover_peek_combat(
+        enter_cover=False,
+        use_special=False,
+        aim_settle_s=0.0,
+        peek_burst_s=10.0,
+        scan_pattern=(),
+        config=LoopConfig(max_duration_s=6.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert res.stop_reason == "cover_blocked"
+    logs = read_telemetry(log_path, tool="runner")
+    assert [r for r in logs if r.get("action") == "fire_burst"] == []
+    shifts = [r for r in logs if r.get("action") == "cover_edge_shift"]
+    assert [s["details"]["sidestep_key"] for s in shifts] == ["a", "d"]
+    assert any(r.get("action") == "cover_blocked" for r in logs)
+    assert ("mouse_down", "left") not in backend.events
+    assert backend.currently_held_keys == set()
+    assert backend.currently_held_buttons == set()
+
+    # 2) If edge shift clears the sightline (white reticle appears on later frames), recovers and fires suppressive bursts instead of aborting.
+    clock2 = FakeClock()
+    backend2 = RecordingInputBackend()
+    log_path2 = tmp_path / "t_recovered.jsonl"
+    logger2 = TelemetryLogger(log_path2)
+    ctrl2 = InputController(backend=backend2, logger=logger2, clock=clock2, sleep_fn=clock2.sleep, register_signals=False)
+    f_visible = _with_center_reticle(_with_textured_center_bg(make_synthetic_minimap_frame(health_ratio=0.95, red_points=[(0.50, 0.45)])), (224, 224, 224))
+    f_blocked_center = _with_textured_center_bg(make_synthetic_minimap_frame(health_ratio=0.95, red_points=[(0.50, 0.45)]))
+    runner2 = ActionRunner(
+        ctrl2,
+        ReplayWindowBackend(lambda idx: f_blocked_center if idx < 7 else f_visible),
+        ScriptedHudOCR(lambda idx: {}),
+        logger2,
+        clock2,
+        clock2.sleep,
+    )
+    res2 = runner2.cover_peek_combat(
+        enter_cover=False,
+        use_special=False,
+        aim_settle_s=0.0,
+        max_shots=1,
+        peek_burst_s=10.0,
+        scan_pattern=(),
+        config=LoopConfig(max_duration_s=6.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert res2.stop_reason == "suppressive_shots_done"
+    shifts2 = [r for r in read_telemetry(log_path2, tool="runner") if r.get("action") == "cover_edge_shift"]
+    assert len(shifts2) == 1
+    assert shifts2[0]["details"]["sidestep_key"] == "d"
+
+
+def test_advance_flank_unblock_handles_single_occluded_enemy_and_commits_4_streaks_per_side(tmp_path) -> None:
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    log_path = tmp_path / "t_flank4.jsonl"
+    logger = TelemetryLogger(log_path)
+    ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
+    # Single occluded close enemy (<= 0.32, 0 red_reticle locks) triggers advance_flank_unblock and commits 4 consecutive 'd' flanks before flipping to 'a'.
+    f_single_close_occ = _with_center_reticle(
+        make_synthetic_minimap_frame(health_ratio=0.90, red_points=[(0.50, 0.62)]),
+        (224, 224, 224),
+    )
+    runner = ActionRunner(ctrl, ReplayWindowBackend(lambda idx: f_single_close_occ), ScriptedHudOCR(lambda idx: {}), logger, clock, clock.sleep)
+    runner.advance_under_fire(
+        aim_settle_s=0.0,
+        move_phase_s=0.2,
+        engage_phase_s=0.5,
+        scan_pattern=(),
+        config=LoopConfig(max_duration_s=45.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    flanks = [r for r in read_telemetry(log_path, tool="runner") if r.get("action") == "advance_flank_unblock"]
+    assert len(flanks) >= 5
+    assert [f["details"]["flank_key"] for f in flanks[:5]] == ["d", "d", "d", "d", "a"]
+    assert backend.currently_held_keys == set()
+    assert backend.currently_held_buttons == set()
+
+
+def test_aim_until_red_reticle_applies_calibrated_recoil_and_recenter_settle(tmp_path) -> None:
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    ctrl = InputController(backend=backend, logger=TelemetryLogger(tmp_path / "t_aim_rec.jsonl"), clock=clock, sleep_fn=clock.sleep, register_signals=False)
+    f_red = _with_center_reticle(make_synthetic_minimap_frame(health_ratio=0.95, red_points=[(0.50, 0.45)]), (245, 30, 30))
+    runner = ActionRunner(ctrl, ReplayWindowBackend(lambda idx: f_red), ScriptedHudOCR(lambda idx: {}), TelemetryLogger(tmp_path / "t_aim_rec.jsonl"), clock, clock.sleep)
+    res = runner.aim_until_red_reticle(
+        fire_on_lock=True,
+        bursts=2,
+        stop_on_shot=True,
+        aim_settle_s=0.0,
+        scan_pattern=(),
+        config=LoopConfig(max_duration_s=2.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert res.stop_reason == "reticle_shot"
+    assert [ev[1] for ev in backend.events if ev[0] == "mouse_delta"] == [(0, 4, ["right"])]
     assert backend.currently_held_buttons == set()
