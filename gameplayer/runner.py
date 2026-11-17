@@ -995,13 +995,19 @@ class ActionRunner:
                             status="ok",
                             details={"streak": blocked_flank_streak, "flank_key": flank_key, "enemy_distance": round(enemy.distance, 3)},
                         )
+                        self.input.key_down("s")
+                        try:
+                            self._sleep_chunked(0.20)
+                        finally:
+                            self.input.key_up("s")
                         self.input.key_down(flank_key)
                         try:
                             self._sleep_chunked(0.55)
                         finally:
                             self.input.key_up(flank_key)
-                        flank_move_s = min(move_phase_s, 1.0)
-                        flank_unblock_until_t = now_t + 0.55 + flank_move_s
+                        self._steer_camera(-80 if flank_key == "a" else 80, 0)
+                        flank_move_s = min(move_phase_s, 0.65)
+                        flank_unblock_until_t = now_t + 0.75 + flank_move_s
                         phase = "move"
                         phase_end_t = flank_unblock_until_t
                         min_move_until_t = flank_unblock_until_t
@@ -1541,7 +1547,7 @@ class ActionRunner:
         heal_wait_s: float = 3.5,
         duck_heal_s: Optional[float] = None,
         exit_on_health_drop: bool = False,
-        peek_burst_s: float = 2.6,
+        peek_burst_s: float = 4.5,
         max_shots: Optional[int] = None,
         stop_when_no_enemies: bool = True,
         no_enemies_clear_s: float = 1.5,
@@ -1845,8 +1851,8 @@ class ActionRunner:
                             return None
                     else:
                         large_steer_ticks = 0
-                        # In-FOV yaw tracking: nudge smoothly every other tick without resetting sweep/fire.
-                        if steer_cadence_ticks % 2 == 1:
+                        # Steer every tick when > 0.08 off-target so cover yaw locks quickly; damp <= 0.08 to every other tick.
+                        if abs(enemy.bearing) > 0.08 or steer_cadence_ticks % 2 == 1:
                             dx = self._ads_steer_dx(enemy.bearing, steer_gain=steer_gain)
                             if dx != 0:
                                 self._steer_camera(dx, 0)
@@ -1854,7 +1860,8 @@ class ActionRunner:
                     steer_cadence_ticks = 0
                     large_steer_ticks = 0
 
-                no_lock_ticks += 1
+                if abs(enemy.bearing) <= 0.16 or steer_cadence_ticks >= 8:
+                    no_lock_ticks += 1
                 if no_lock_ticks >= 16:
                     no_lock_ticks = 0
                     target_idx += 1

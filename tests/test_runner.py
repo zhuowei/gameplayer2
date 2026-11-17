@@ -1534,6 +1534,7 @@ def test_advance_under_fire_no_backward_ally_steer_and_crossfire_lateral_reposit
     flanks = [r for r in read_telemetry(log_path3, tool="runner") if r.get("action") == "advance_flank_unblock"]
     assert len(flanks) >= 1
     assert flanks[0]["details"]["flank_key"] == "d"
+    assert ("key_down", "s") in backend3.events
     assert ("key_down", "w") in backend3.events
     assert backend3.currently_held_keys == set()
 
@@ -1559,3 +1560,24 @@ def test_on_foot_sidestep_releases_w_backs_off_and_alternates_after_attempt_3(tm
     assert ("key_up", "w") in backend.events
     assert ("key_down", "s") in backend.events
     assert backend.currently_held_keys == set()
+
+
+def test_cover_peek_combat_steers_every_tick_above_008_bearing(tmp_path) -> None:
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    ctrl = InputController(backend=backend, logger=TelemetryLogger(tmp_path / "t_fast_steer.jsonl"), clock=clock, sleep_fn=clock.sleep, register_signals=False)
+    # Enemy at +0.25 bearing (> 0.08): first 3 ticks must ALL emit positive steer dx (not skipped every other tick) and keep right-click held past 2.6s (peek_burst_s=4.5).
+    f_right = make_synthetic_minimap_frame(health_ratio=0.95, red_points=[(0.65, 0.50)])
+    runner = ActionRunner(ctrl, ReplayWindowBackend(lambda idx: f_right), ScriptedHudOCR(lambda idx: {}), TelemetryLogger(tmp_path / "t_fast_steer.jsonl"), clock, clock.sleep)
+    runner.cover_peek_combat(
+        enter_cover=False,
+        use_special=False,
+        aim_settle_s=0.0,
+        scan_pattern=(),
+        config=LoopConfig(max_duration_s=3.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    steer_dxs = [ev[1][0] for ev in backend.events if ev[0] == "mouse_delta"]
+    assert len(steer_dxs) >= 15
+    assert all(dx > 0 for dx in steer_dxs[:4])
+    assert backend.events.count(("mouse_up", "right")) == 1
+    assert backend.currently_held_buttons == set()
