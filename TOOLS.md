@@ -135,3 +135,30 @@ Offline 16:9 HUD region extractor and native macOS Vision OCR (`VNRecognizeTextR
 - `crop_hud_regions(image, regions=HUD_REGIONS)`
 - `classify_center_banner(lines) -> Optional[str]`
 - `VisionOCRBackend()` (macOS Vision) or custom `OCRBackend` for offline tests.
+
+---
+
+## 6. Minimap & Health/Armor Extraction (`gameplayer.minimap`)
+
+Calibrated bottom-left 16:9 minimap parser extracting:
+- `health_ratio` (`0.0..1.0`, green or low-health red) & `armor_ratio` (`0.0..1.0`, blue)
+- `minimap_visible` (false during cutscenes/menus)
+- Colored blips & GPS routes (`yellow`, `purple`, `red`, `blue`) -> `bearing` (`-1.0..+1.0`, `0.0` straight ahead) and relative `distance`
+
+### CLI Usage
+
+```bash
+.venv/bin/python -m gameplayer.minimap --inspect-frame captures/prologue_9.png
+```
+
+---
+
+## 7. Closed-Loop Action Runner (`gameplayer.runner`)
+
+Fast local ~8–12 Hz perception + control loops (`ActionRunner`) combining `capture_game_window`, `inspect_minimap`, `inspect_frame`, and `InputController`:
+- `run_until_event(hold_keys=..., hold_buttons=..., predicate=..., config=...)`
+- `follow_route_on_foot(sprint=False, target_color="yellow", ...)`
+- `follow_gps_drive(route_color="yellow", ...)`
+- `combat_burst_scan(aim_button="right", fire_button="left", ...)`
+
+Automatically releases ALL held inputs in `finally` on `WASTED`/`BUSTED`/`MISSION_FAILED`/`MISSION_PASSED` banners, new `top_left_help` / subtitle changes, rapid `health_drop`, target reached, or `max_duration_s` timeout.
