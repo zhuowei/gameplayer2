@@ -496,6 +496,17 @@ class ActionRunner:
         finally:
             self.input.key_up(key)
 
+    def _steer_camera(self, dx: int, dy: int) -> None:
+        """Emit smooth multi-step relative mouse deltas so Wine/DirectInput never drops large jumps."""
+        mag = max(abs(dx), abs(dy))
+        if mag == 0:
+            return
+        if mag > 28:
+            steps = max(2, min(6, mag // 20))
+            self.input.mouse_delta(dx, dy, steps=steps, duration_s=0.015)
+        else:
+            self.input.mouse_delta(dx, dy, steps=1, duration_s=0.0)
+
     def _fire_bursts(self, fire_button: str, bursts: int = 1, hold_s: float = 0.03, gap_s: float = 0.03) -> None:
         for idx in range(max(1, bursts)):
             self.input.mouse_down(fire_button)
@@ -549,7 +560,7 @@ class ActionRunner:
             if abs(enemy.bearing) > align_threshold:
                 dx = int(round(max(-240.0, min(240.0, enemy.bearing * steer_gain))))
                 if dx != 0:
-                    self.input.mouse_delta(dx, 0, steps=1, duration_s=0.0)
+                    self._steer_camera(dx, 0)
             else:
                 self._fire_bursts(fire_button, bursts=1, hold_s=0.03)
             return None
@@ -616,7 +627,7 @@ class ActionRunner:
                 aligned_without_lock_ticks = 0
                 dx = int(round(max(-220.0, min(220.0, enemy.bearing * steer_gain))))
                 if dx != 0:
-                    self.input.mouse_delta(dx, 0, steps=1, duration_s=0.0)
+                    self._steer_camera(dx, 0)
                     if abs(dx) >= 30:
                         sweep_idx = 0
                 return None
@@ -878,7 +889,7 @@ class ActionRunner:
                     aligned_ticks = 0
                     dx = int(round(max(-220.0, min(220.0, enemy.bearing * steer_gain))))
                     if dx != 0:
-                        self.input.mouse_delta(dx, 0, steps=1, duration_s=0.0)
+                        self._steer_camera(dx, 0)
                         if abs(dx) >= 30:
                             sweep_idx = 0
                     return None

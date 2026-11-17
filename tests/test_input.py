@@ -296,6 +296,9 @@ def test_cgevent_backend_warps_cursor_back_to_center_when_offscreen(monkeypatch)
 
     class _FakeQuartz:
         kCGEventSourceStateHIDSystemState = 0
+        kCGEventSuppressionStateSuppressionInterval = 0
+        kCGEventSuppressionStateRemoteMouseDrag = 1
+        kCGEventFilterMaskPermitAllEvents = 0x7
         kCGEventMouseMoved = 5
         kCGEventRightMouseDragged = 7
         kCGMouseButtonLeft = 0
@@ -308,8 +311,18 @@ def test_cgevent_backend_warps_cursor_back_to_center_when_offscreen(monkeypatch)
         kCGEventFlagMaskAlternate = 4
         kCGEventFlagMaskCommand = 8
 
+        def __init__(self) -> None:
+            self.suppression_interval = None
+            self.filters: list[tuple[int, int]] = []
+
         def CGEventSourceCreate(self, state):
             return object()
+
+        def CGEventSourceSetLocalEventsSuppressionInterval(self, src, interval):
+            self.suppression_interval = interval
+
+        def CGEventSourceSetLocalEventsFilterDuringSuppressionState(self, src, mask, state):
+            self.filters.append((mask, state))
 
         def CGEventCreate(self, src):
             return object()
@@ -343,6 +356,8 @@ def test_cgevent_backend_warps_cursor_back_to_center_when_offscreen(monkeypatch)
     monkeypatch.setitem(sys.modules, "Quartz", fake_q)
     backend = gp_input.CGEventInputBackend()
     backend.mouse_move_delta(-67, 0, held_buttons=frozenset({"right"}))
+    assert fake_q.suppression_interval == 0.0
+    assert len(fake_q.filters) == 2
     assert warped == [(960.0, 540.0)]
     assert fake_q.last_posted["pos"] == (893.0, 540.0)
     assert fake_q.last_posted[fake_q.kCGMouseEventDeltaX] == -67
