@@ -826,6 +826,8 @@ class ActionRunner:
         steer_gain: float = 220.0,
         bearing_deadband: float = 0.10,
         aim_settle_s: float = 0.18,
+        recoil_comp_dy: int = 4,
+        exposed_duck_drop_threshold: float = 0.12,
         scan_pattern: Sequence[tuple[int, int]] = DEFAULT_RETICLE_SWEEP,
         config: Optional[LoopConfig] = None,
     ) -> LoopResult:
@@ -862,6 +864,8 @@ class ActionRunner:
         peek_start_t = 0.0
         duck_until_t = 0.0
         duck_logged = False
+        duck_reason_heal = False
+        duck_start_health: Optional[float] = None
         peak_health: Optional[float] = None
         sweep_idx = 0
         sweep_offset_x = 0
@@ -897,7 +901,7 @@ class ActionRunner:
                 is_peeking = False
 
         def _on_tick(state: FrameState) -> Optional[str]:
-            nonlocal special_triggered, duck_until_t, duck_logged, peak_health, sweep_idx, sweep_offset_x, sweep_offset_y, shots_fired, no_enemy_ticks, no_enemy_since_t, aligned_ticks, steer_cadence_ticks, large_steer_ticks, clamped_ticks, last_clamped_bearing
+            nonlocal special_triggered, duck_until_t, duck_logged, duck_reason_heal, duck_start_health, peak_health, sweep_idx, sweep_offset_x, sweep_offset_y, shots_fired, no_enemy_ticks, no_enemy_since_t, aligned_ticks, steer_cadence_ticks, large_steer_ticks, clamped_ticks, last_clamped_bearing
             mm = state.minimap
             now_t = state.elapsed_s
 
@@ -907,6 +911,24 @@ class ActionRunner:
 
             # Check in-loop heal/duck trigger (low HP or rapid drop when HP < 0.70 / low armor)
             if mm.minimap_visible:
+                if (
+                    duck_reason_heal
+                    and now_t < duck_until_t
+                    and duck_start_health is not None
+                    and (duck_start_health - mm.health_ratio) >= exposed_duck_drop_threshold
+                ):
+                    self._logger.log(
+                        tool="runner",
+                        action="cover_exposed",
+                        status="ok",
+                        details={
+                            "duck_start_health": round(duck_start_health, 3),
+                            "health_ratio": round(mm.health_ratio, 3),
+                        },
+                    )
+                    _set_peek(False, now_t)
+                    return "exposed_in_cover"
+
                 if peak_health is None or mm.health_ratio > peak_health:
                     peak_health = mm.health_ratio
                 rapid_drop = (peak_health - mm.health_ratio) >= rapid_drop_duck_threshold and (
@@ -915,6 +937,9 @@ class ActionRunner:
                 if mm.health_ratio < min_peek_health or rapid_drop:
                     _set_peek(False, now_t)
                     duck_until_t = max(duck_until_t, now_t + eff_heal_wait_s)
+                    if not duck_reason_heal:
+                        duck_reason_heal = True
+                        duck_start_health = mm.health_ratio
                     peak_health = mm.health_ratio
                     if not duck_logged:
                         duck_logged = True
@@ -931,6 +956,8 @@ class ActionRunner:
                 return None
 
             duck_logged = False
+            duck_reason_heal = False
+            duck_start_health = None
 
             # Limit continuous exposure during peek bursts
             if is_peeking and (now_t - peek_start_t) >= peek_burst_s:
@@ -950,6 +977,8 @@ class ActionRunner:
                 clamped_ticks = 0
                 last_clamped_bearing = None
                 self._fire_bursts(fire_button, bursts=3, hold_s=0.03, gap_s=0.025, reason="red_reticle")
+                if recoil_comp_dy > 0:
+                    self.input.mouse_delta(0, int(recoil_comp_dy), steps=1, duration_s=0.01)
                 shots_fired += 1
                 if max_shots is not None and shots_fired >= max_shots:
                     _recenter_sweep()
@@ -1030,6 +1059,8 @@ class ActionRunner:
                     aligned_ticks += 1
                     if aligned_ticks % 3 == 0:
                         self._fire_bursts(fire_button, bursts=2, hold_s=0.03, gap_s=0.03, reason="suppressive")
+                        if recoil_comp_dy > 0:
+                            self.input.mouse_delta(0, int(recoil_comp_dy), steps=1, duration_s=0.01)
                         shots_fired += 1
                         if max_shots is not None and shots_fired >= max_shots:
                             _recenter_sweep()

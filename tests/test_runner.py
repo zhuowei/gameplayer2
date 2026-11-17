@@ -572,10 +572,62 @@ def test_cover_peek_combat_recenters_sweep_pitch_across_cover_ducks(tmp_path) ->
         enter_cover=False,
         use_special=False,
         peek_burst_s=0.65,
+        recoil_comp_dy=0,
         no_enemies_clear_s=0.25,
         config=LoopConfig(max_duration_s=5.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
     )
     assert res.stop_reason == "enemies_cleared"
     total_dy = sum(ev[1][1] for ev in backend.events if ev[0] == "mouse_delta")
     assert total_dy == 0
+    assert backend.currently_held_buttons == set()
+
+
+def test_cover_peek_combat_applies_downward_recoil_compensation(tmp_path) -> None:
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    logger = TelemetryLogger(tmp_path / "t.jsonl")
+    ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
+
+    f_enemy = _with_center_reticle(make_synthetic_minimap_frame(health_ratio=0.95, red_points=[(0.50, 0.40)]), (245, 245, 245))
+    win_backend = ReplayWindowBackend(lambda idx: f_enemy)
+    runner = ActionRunner(ctrl, win_backend, ScriptedHudOCR(lambda idx: {}), logger, clock, clock.sleep)
+
+    res = runner.cover_peek_combat(
+        enter_cover=False,
+        use_special=False,
+        max_shots=2,
+        recoil_comp_dy=4,
+        scan_pattern=(),
+        config=LoopConfig(max_duration_s=4.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert res.stop_reason == "suppressive_shots_done"
+    recoil_deltas = [ev[1] for ev in backend.events if ev[0] == "mouse_delta"]
+    assert recoil_deltas == [(0, 4, ["right"]), (0, 4, ["right"])]
+    assert backend.currently_held_buttons == set()
+
+
+def test_cover_peek_combat_aborts_exposed_in_cover_when_health_drops_during_duck(tmp_path) -> None:
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    log_path = tmp_path / "t.jsonl"
+    logger = TelemetryLogger(log_path)
+    ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
+
+    f_start = make_synthetic_minimap_frame(health_ratio=0.90, red_points=[(0.50, 0.40)])
+    f_duck = make_synthetic_minimap_frame(health_ratio=0.40, red_points=[(0.50, 0.40)])
+    f_exposed_hit = make_synthetic_minimap_frame(health_ratio=0.22, red_points=[(0.50, 0.40)])
+    frames = [f_start, f_duck, f_exposed_hit]
+    win_backend = ReplayWindowBackend(lambda idx: frames[min(idx, len(frames) - 1)])
+    runner = ActionRunner(ctrl, win_backend, ScriptedHudOCR(lambda idx: {}), logger, clock, clock.sleep)
+
+    res = runner.cover_peek_combat(
+        enter_cover=False,
+        use_special=False,
+        heal_wait_s=3.5,
+        exposed_duck_drop_threshold=0.12,
+        config=LoopConfig(max_duration_s=5.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert res.stop_reason == "exposed_in_cover"
+    assert res.ticks <= 4
+    assert any(r.get("action") == "cover_exposed" for r in read_telemetry(log_path, tool="runner"))
     assert backend.currently_held_buttons == set()
