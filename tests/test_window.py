@@ -163,5 +163,51 @@ def test_window_bounds_intersects_and_to_dict() -> None:
     c = WindowBounds(1700, 0, 200, 200)
     assert a.intersects(b) is True
     assert b.intersects(c) is False
+    assert b.center == (960.0, 540.0)
     win = WindowInfo(156, "GTA5.exe", "Grand Theft Auto V", 1167, b, obstructed_by=("OBS Studio(pid=1074,wid=95)",))
     assert win.to_dict()["obstructed_by"] == ["OBS Studio(pid=1074,wid=95)"]
+
+
+def test_focus_game_window_warps_and_optionally_clicks_window_center(tmp_path) -> None:
+    class _CenterAwareBackend(MockWindowBackend):
+        def __init__(self, windows: list[WindowInfo]) -> None:
+            super().__init__(windows, {})
+            self.warped: list[tuple[float, float]] = []
+            self.clicked: list[tuple[tuple[float, float], str, float]] = []
+
+        def warp_cursor_to_window_center(self, window: WindowInfo) -> tuple[float, float]:
+            self.warped.append(window.bounds.center)
+            return window.bounds.center
+
+        def click_window_center(
+            self, window: WindowInfo, button: str = "right", hold_s: float = 0.04
+        ) -> tuple[float, float]:
+            self.clicked.append((window.bounds.center, button, hold_s))
+            return window.bounds.center
+
+    win = WindowInfo(
+        window_id=156,
+        owner="GTA5.exe",
+        title="Grand Theft Auto V",
+        pid=1167,
+        bounds=WindowBounds(100.0, 200.0, 1280.0, 720.0),
+        is_frontmost=False,
+    )
+    backend = _CenterAwareBackend([win])
+    logger = TelemetryLogger(tmp_path / "telemetry.jsonl")
+
+    focus_game_window(backend=backend, logger=logger, allow_focus=True)
+    assert backend.warped == [(740.0, 560.0)]
+    assert backend.clicked == []
+
+    focus_game_window(
+        backend=backend,
+        logger=logger,
+        allow_focus=True,
+        click_to_activate=True,
+        activate_button="right",
+    )
+    assert backend.clicked == [((740.0, 560.0), "right", 0.04)]
+    recs = read_telemetry(tmp_path / "telemetry.jsonl", tool="window")
+    assert recs[-1]["details"]["clicked_to_activate"] == "right"
+    assert recs[-1]["details"]["cursor_warped_to"] == [740.0, 560.0]

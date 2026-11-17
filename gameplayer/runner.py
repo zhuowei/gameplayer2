@@ -13,7 +13,7 @@ from gameplayer.hud import HudObservation, OCRBackend, inspect_frame
 from gameplayer.input import InputController
 from gameplayer.minimap import MinimapObservation, inspect_minimap
 from gameplayer.telemetry import TelemetryLogger, get_default_logger
-from gameplayer.window import CaptureResult, WindowBackend, capture_game_window
+from gameplayer.window import CaptureResult, WindowBackend, WindowInfo, capture_game_window, find_game_window
 
 
 DEFAULT_RETICLE_SWEEP: tuple[tuple[int, int], ...] = (
@@ -221,6 +221,10 @@ class ActionRunner:
                         logger=self._logger,
                         require_16_9=True,
                     )
+                    if ticks == 0 and hasattr(self.input.backend, "set_anchor_bounds"):
+                        wb = cap.window.bounds
+                        if wb.width > 0 and wb.height > 0:
+                            self.input.backend.set_anchor_bounds(wb.x, wb.y, wb.width, wb.height)
                     mm = inspect_minimap(cap.image, logger=self._logger)
                     last_minimap = mm
 
@@ -329,6 +333,39 @@ class ActionRunner:
             initial_buttons=hold_buttons,
         )
 
+    def activate_wine_capture(
+        self,
+        button: str = "right",
+        hold_s: float = 0.04,
+        timeout_s: Optional[float] = None,
+    ) -> WindowInfo:
+        """Center cursor inside the GTA 5 window and click `button` so Wine captures keyboard/mouse input.
+
+        WARNING: Avoid `button="right"` inside the Pause Menu (`right` backs out of menus).
+        """
+        win = find_game_window(backend=self._window_backend)
+        wb = win.bounds
+        self.input.click_window_center(
+            window_bounds=(wb.x, wb.y, wb.width, wb.height),
+            button=button,
+            hold_s=hold_s,
+            timeout_s=timeout_s,
+        )
+        self._logger.log(
+            tool="runner",
+            action="activate_wine_capture",
+            status="ok",
+            details={"window_id": win.window_id, "button": button, "bounds": [wb.x, wb.y, wb.width, wb.height]},
+        )
+        return win
+
+    def _sleep_chunked(self, duration_s: float, step: float = 0.1) -> None:
+        rem = max(0.0, float(duration_s))
+        while rem > 0:
+            dt = min(step, rem)
+            self._sleep(dt)
+            rem -= dt
+
     def follow_route_on_foot(
         self,
         sprint: bool = False,
@@ -337,14 +374,56 @@ class ActionRunner:
         steer_gain: float = 160.0,
         deadband: float = 0.05,
         stop_on_subtitle_keywords: Sequence[str] = ("return to", "wait for", "stay with", "follow"),
+        enable_stuck_recovery: bool = True,
+        stuck_window_s: float = 1.5,
+        stuck_motion_threshold: float = 2.5,
+        unstuck_duration_s: float = 0.55,
+        vault_on_stuck: bool = True,
         config: Optional[LoopConfig] = None,
     ) -> LoopResult:
-        """Walk/sprint toward minimap route/objective with crew-tether subtitle keyword stop."""
+        """Walk/sprint toward minimap route/objective with crew-tether subtitle stop and obstacle recovery."""
         cfg = config or LoopConfig(max_duration_s=10.0, hz=10.0)
         keys = ("w", "lshift") if sprint else ("w",)
         norm_keywords = tuple(kw.strip().lower() for kw in stop_on_subtitle_keywords if kw.strip())
+        prev_gray: Optional[np.ndarray] = None
+        last_motion_check_t: Optional[float] = None
+        low_motion_elapsed_s = 0.0
+        last_bearing = 0.0
+        recovery_count = 0
+
+        def _perform_on_foot_stuck_recovery() -> None:
+            nonlocal recovery_count, low_motion_elapsed_s, prev_gray
+            recovery_count += 1
+            if last_bearing < -0.05:
+                sidestep_key = "a"
+            elif last_bearing > 0.05:
+                sidestep_key = "d"
+            else:
+                sidestep_key = "d" if recovery_count % 2 == 1 else "a"
+
+            self._logger.log(
+                tool="runner",
+                action="on_foot_stuck_recovery",
+                status="ok",
+                details={
+                    "attempt": recovery_count,
+                    "sidestep_key": sidestep_key,
+                    "duration_s": unstuck_duration_s,
+                    "vault": vault_on_stuck,
+                },
+            )
+            self.input.key_down(sidestep_key)
+            try:
+                if vault_on_stuck:
+                    self._tap_key_preserving_held("space", hold_s=0.06)
+                self._sleep_chunked(unstuck_duration_s)
+            finally:
+                self.input.key_up(sidestep_key)
+            low_motion_elapsed_s = 0.0
+            prev_gray = None
 
         def _on_tick(state: FrameState) -> Optional[str]:
+            nonlocal prev_gray, last_motion_check_t, low_motion_elapsed_s, last_bearing
             if state.hud is not None and norm_keywords:
                 combined_hud = f"{state.hud.subtitle_or_objective} {state.hud.help_prompt}".lower()
                 for kw in norm_keywords:
@@ -370,6 +449,25 @@ class ActionRunner:
                 bearing = mm.purple_route_bearing
             elif target is not None:
                 bearing = target.bearing
+
+            if bearing is not None:
+                last_bearing = bearing
+
+            if enable_stuck_recovery:
+                cur_gray = _road_gray_sample(state.capture.image)
+                if prev_gray is not None and last_motion_check_t is not None:
+                    dt = max(0.0, state.elapsed_s - last_motion_check_t)
+                    motion = _road_motion_score(prev_gray, cur_gray)
+                    if motion < stuck_motion_threshold:
+                        low_motion_elapsed_s += dt
+                    else:
+                        low_motion_elapsed_s = 0.0
+                prev_gray = cur_gray
+                last_motion_check_t = state.elapsed_s
+
+                if low_motion_elapsed_s >= stuck_window_s and (cfg.max_duration_s - state.elapsed_s) > 0.25:
+                    _perform_on_foot_stuck_recovery()
+                    return None
 
             if bearing is not None and abs(bearing) > deadband:
                 dx = int(round(max(-240.0, min(240.0, bearing * steer_gain))))
@@ -447,12 +545,7 @@ class ActionRunner:
                 status="ok",
                 details={"attempt": recovery_count, "counter_steer": counter_steer, "duration_s": reverse_duration_s},
             )
-            step = 0.1
-            rem = max(0.0, reverse_duration_s)
-            while rem > 0:
-                dt = min(step, rem)
-                self._sleep(dt)
-                rem -= dt
+            self._sleep_chunked(reverse_duration_s)
             _set_key(counter_steer, False)
             _set_key(brake_key, False)
             low_motion_elapsed_s = 0.0

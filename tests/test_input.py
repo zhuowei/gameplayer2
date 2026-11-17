@@ -360,3 +360,42 @@ def test_cgevent_backend_warps_cursor_back_to_center_when_offscreen(monkeypatch)
     assert warped == [(960.0, 540.0)]
     assert fake_q.last_posted["pos"] == (893.0, 540.0)
     assert fake_q.last_posted[fake_q.kCGMouseEventDeltaX] == -67
+
+    # Window-anchored bounds warp to the window center instead of the display center
+    warped.clear()
+    backend.set_anchor_bounds(100.0, 200.0, 1280.0, 720.0)
+    backend.mouse_move_delta(15, -5, held_buttons=frozenset())
+    assert warped == [(740.0, 560.0)]
+    assert fake_q.last_posted["pos"] == (755.0, 555.0)
+
+
+def test_input_controller_click_window_center_anchors_warps_and_releases(tmp_path) -> None:
+    class _AnchorRecordingBackend(FaultyReleaseBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.anchor_bounds: list[tuple[float, float, float, float]] = []
+            self.warp_calls = 0
+
+        def set_anchor_bounds(self, x: float, y: float, width: float, height: float) -> None:
+            self.anchor_bounds.append((x, y, width, height))
+
+        def warp_to_center(self) -> tuple[float, float]:
+            self.warp_calls += 1
+            x, y, w, h = self.anchor_bounds[-1]
+            return (x + w * 0.5, y + h * 0.5)
+
+    clock = FakeClock()
+    backend = _AnchorRecordingBackend()
+    ctrl = InputController(
+        backend=backend,
+        logger=TelemetryLogger(tmp_path / "t.jsonl"),
+        clock=clock,
+        sleep_fn=clock.sleep,
+        register_signals=False,
+    )
+    ctrl.click_window_center(window_bounds=(320.0, 180.0, 1280.0, 720.0), button="right", hold_s=0.04)
+    assert backend.anchor_bounds == [(320.0, 180.0, 1280.0, 720.0)]
+    assert backend.warp_calls == 1
+    assert ("mouse_down", "right") in backend.events
+    assert ("mouse_up", "right") in backend.events
+    assert ctrl.held_buttons == frozenset()

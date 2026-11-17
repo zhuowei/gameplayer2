@@ -42,6 +42,10 @@ class WindowBounds:
     def area(self) -> float:
         return max(0.0, self.width) * max(0.0, self.height)
 
+    @property
+    def center(self) -> tuple[float, float]:
+        return (self.x + self.width * 0.5, self.y + self.height * 0.5)
+
     def intersects(self, other: "WindowBounds") -> bool:
         return (
             self.x < (other.x + other.width)
@@ -360,6 +364,42 @@ class QuartzWindowBackend:
 
         return self._is_window_active_and_unobstructed(window)
 
+    def warp_cursor_to_window_center(self, window: WindowInfo) -> tuple[float, float]:
+        """Center the macOS cursor inside `window.bounds` without emitting a click."""
+        cx, cy = window.bounds.center
+        self._quartz.CGWarpMouseCursorPosition((float(cx), float(cy)))
+        return (float(cx), float(cy))
+
+    def click_window_center(
+        self,
+        window: WindowInfo,
+        button: str = "right",
+        hold_s: float = 0.04,
+    ) -> tuple[float, float]:
+        """Warp to `window.bounds.center` and click `button` (with guaranteed release) so Wine captures input."""
+        norm_btn = button.strip().lower()
+        q = self._quartz
+        if norm_btn == "left":
+            down_type, up_type, cg_btn = q.kCGEventLeftMouseDown, q.kCGEventLeftMouseUp, q.kCGMouseButtonLeft
+        elif norm_btn == "right":
+            down_type, up_type, cg_btn = q.kCGEventRightMouseDown, q.kCGEventRightMouseUp, q.kCGMouseButtonRight
+        elif norm_btn == "middle":
+            down_type, up_type, cg_btn = q.kCGEventOtherMouseDown, q.kCGEventOtherMouseUp, q.kCGMouseButtonCenter
+        else:
+            raise ValueError(f"Unknown mouse button: {button!r}")
+
+        pos = self.warp_cursor_to_window_center(window)
+        src = q.CGEventSourceCreate(q.kCGEventSourceStateHIDSystemState)
+        ev_down = q.CGEventCreateMouseEvent(src, down_type, pos, cg_btn)
+        q.CGEventPost(q.kCGHIDEventTap, ev_down)
+        try:
+            if hold_s > 0:
+                time.sleep(hold_s)
+        finally:
+            ev_up = q.CGEventCreateMouseEvent(src, up_type, pos, cg_btn)
+            q.CGEventPost(q.kCGHIDEventTap, ev_up)
+        return pos
+
 
 def _score_candidate(
     window: WindowInfo,
@@ -476,6 +516,9 @@ def focus_game_window(
     logger: Optional[TelemetryLogger] = None,
     *,
     allow_focus: bool = False,
+    warp_cursor_to_center: bool = True,
+    click_to_activate: bool = False,
+    activate_button: str = "right",
     owner_patterns: Sequence[str] = DEFAULT_OWNER_PATTERNS,
     title_patterns: Sequence[str] = DEFAULT_TITLE_PATTERNS,
 ) -> WindowInfo:
@@ -512,6 +555,13 @@ def focus_game_window(
                 f"Failed to bring window_id={refreshed.window_id} (pid={refreshed.pid}) to front "
                 f"(is_frontmost={refreshed.is_frontmost}, obstructed_by={list(refreshed.obstructed_by)})"
             )
+        if click_to_activate and hasattr(active_backend, "click_window_center"):
+            cx, cy = active_backend.click_window_center(refreshed, button=activate_button, hold_s=0.04)
+            details["clicked_to_activate"] = activate_button
+            details["cursor_warped_to"] = [round(cx, 1), round(cy, 1)]
+        elif warp_cursor_to_center and hasattr(active_backend, "warp_cursor_to_window_center"):
+            cx, cy = active_backend.warp_cursor_to_window_center(refreshed)
+            details["cursor_warped_to"] = [round(cx, 1), round(cy, 1)]
         return refreshed
 
 

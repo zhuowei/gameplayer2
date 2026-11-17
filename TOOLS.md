@@ -36,9 +36,10 @@ Black-box window metadata discovery (`CGWindowListCopyWindowInfo`) and clean uno
 - `capture_game_window(target_width=None, crop_titlebar=True, require_16_9=True) -> CaptureResult`:
   - Normalizes aspect ratio to 16:9 (`normalize_to_16_9` crops top title bar if taller than 16:9, or horizontal center if wider).
   - `.to_numpy()` returns `(H, W, 3)` `uint8` RGB array; `.save(path)` writes PNG.
-- `focus_game_window(..., allow_focus=True) -> WindowInfo`:
+- `focus_game_window(..., allow_focus=True, warp_cursor_to_center=True, click_to_activate=False, activate_button="right") -> WindowInfo`:
   - **STRICT OWNERSHIP**: ONLY `player` may call `focus_game_window(..., allow_focus=True)`. Raises `PermissionError` if `allow_focus` is not explicitly `True`.
   - Uses Accessibility (`AXRaise` + `AXFrontmost`), Carbon `SetFrontProcess`, `NSRunningApplication.activateWithOptions_`, and `System Events` fallback, then pumps `NSRunLoop` and verifies both `is_frontmost` and `obstructed_by == ()` (raising `WindowCaptureError` if blocked).
+  - Automatically warps the cursor to `window.bounds.center` (`warp_cursor_to_center=True`). Pass `click_to_activate=True` during live gameplay if Wine ignores keyboard/`mouse_delta` despite `is_frontmost=True` (**WARNING**: do NOT use `activate_button="right"` inside the Pause Menu because `right` backs out of menus).
 
 ---
 
@@ -72,6 +73,7 @@ Sends macOS Quartz `CGEvent` keyboard/mouse events (`CGEventInputBackend`) with 
 
 - `tap(key, duration_s=0.06, timeout_s=None)`
 - `click(button="left", duration_s=0.06, timeout_s=None)`
+- `click_window_center(window_bounds=None, button="right", hold_s=0.04, timeout_s=None)`: anchors cursor recentering to `window_bounds`, warps to window center, and clicks `button` to restore Wine keyboard/mouse capture (**WARNING**: avoid `button="right"` inside Pause Menu).
 - `hold(keys=(), buttons=(), duration_s=0.1, timeout_s=None)`
 - `mouse_delta(dx, dy, steps=1, duration_s=0.0, timeout_s=None)` (automatically uses `*MouseDragged` events when a mouse button is held)
 - `switch_character(character, method="hotkey", wheel_hold_s=0.30, timeout_s=None)`: switches between `michael` (`f5`), `franklin` (`f6`), `trevor` (`f7`), `online` (`f8`), `method="wheel"` (`lalt` + small 60px `mouse_delta`), or `method="wheel_hold"` (holds `lalt` without mouse nudge when the target character is already pre-highlighted). Note: do NOT mix `key_down("lalt")` with `tap()`/`hold()` outside `run_sequence` because `hold()`/`tap()` enforces `release_all()` on completion; use `switch_character` or `run_sequence`.
@@ -157,16 +159,17 @@ Calibrated bottom-left 16:9 minimap parser extracting:
 ## 7. Closed-Loop Action Runner (`gameplayer.runner`)
 
 Fast local ~8–12 Hz perception + control loops (`ActionRunner`) combining `capture_game_window`, `inspect_minimap`, `inspect_frame`, and `InputController`:
+- `activate_wine_capture(button="right", hold_s=0.04, timeout_s=None)`: locates the GTA 5 window and calls `click_window_center` when Wine ignores inputs despite `is_frontmost=True` (**WARNING**: do NOT use `button="right"` on the Pause Menu).
 - `run_until_event(hold_keys=..., hold_buttons=..., predicate=..., config=...)`
-- `follow_route_on_foot(sprint=False, target_color="yellow", stop_on_subtitle_keywords=("return to", "wait for", "stay with", "follow"), ...)`: automatically aborts forward movement if a crew-tether warning subtitle/help prompt appears (preventing `"The crew were left behind."` fails).
+- `follow_route_on_foot(sprint=False, target_color="yellow", stop_on_subtitle_keywords=("return to", "wait for", "stay with", "follow"), enable_stuck_recovery=True, ...)`: automatically aborts forward movement if a crew-tether warning subtitle/help prompt appears (preventing `"The crew were left behind."` fails), and performs automatic visual-motion obstacle recovery (`a`/`d` sidestep + `space` vault) if forward motion stalls for `>= 1.5s`.
 - `follow_blue_ally(sprint=False, arrive_distance=0.14, ...)`: steers back to the nearest blue ally blip (e.g., Michael & Brad during Prologue yard/gate exit—do NOT sprint far down the road alone!).
 - `follow_gps_drive(route_color="yellow", ...)` (includes automatic visual-motion stuck-car recovery: reverses `s` + counter-steers for `0.8s` if road motion stalls for `1.5s`)
 - `combat_burst_scan(aim_button="right", fire_button="left", ...)`
 - `aim_until_red_reticle(...)` / `aim_and_shoot(...)` / `hostage_shot(...)`: holds aim (`right`), sweeps/steers until `detect_red_reticle()` detects hostile red reticle contrast at `(0.5, 0.5)`, and fires precision `left` bursts (strictly waits for red reticle).
 - `shoot_enemies(..., use_special=False)`: multi-target combat loop combining minimap bearing steering, red-reticle precision shots, periodic suppressive bursts when aligned on distant/covered enemies (`fallback_fire_on_aligned=True`), and periodic aim re-tap to pop out of cover / snap.
-- `cover_peek_combat(enter_cover=True, use_special=True, min_peek_health=0.45, heal_wait_s=3.5, exit_on_health_drop=False, stop_when_no_enemies=True, no_enemies_clear_s=1.5, ...)`:
+- `cover_peek_combat(enter_cover=True, use_special=True, min_peek_health=0.45, heal_wait_s=3.5, exit_on_health_drop=False, recoil_comp_dy=4, exposed_duck_drop_threshold=0.12, stop_when_no_enemies=True, no_enemies_clear_s=1.5, ...)`:
   - **Cover-toggle safety**: `q` is a toggle in GTA 5! Pass `enter_cover=False` when already crouched in cover so it does not stand out of cover.
-  - Keeps aim held during in-FOV cover steering (never dropping peek to steer), scans torso/cover heights (`dy` down to `+38 px`) via `DEFAULT_RETICLE_SWEEP`, triggers `cover_clamped` only when stuck outside cover FOV (`|bearing| > 0.45`), activates `capslock` special when `special_ratio >= 0.20`, ducks/regenerates for `heal_wait_s=3.5s` on `< min_peek_health` or rapid `>= 0.20` health drop and resumes in-loop, and exits early as `"enemies_cleared"` once no red minimap blips appear for `1.5s`.
+  - Keeps aim held during in-FOV cover steering (never dropping peek to steer), applies downward `recoil_comp_dy=4` per burst, scans torso/cover heights (`dy` down to `+38 px`) via `DEFAULT_RETICLE_SWEEP` with `_recenter_sweep()` on ducks/exits, triggers `cover_clamped` only when stuck outside cover FOV (`|bearing| > 0.45`), aborts immediately as `"exposed_in_cover"` if health keeps dropping `>= 0.12` while ducked, activates `capslock` special when `special_ratio >= 0.20`, ducks/regenerates for `heal_wait_s=3.5s` on `< min_peek_health` or rapid `>= 0.20` health drop and resumes in-loop, and exits early as `"enemies_cleared"` once no red minimap blips appear for `1.5s`.
 - `switch_character(character, method="hotkey" | "wheel")`
 
 Automatically releases ALL held inputs in `finally` on `WASTED`/`BUSTED`/`MISSION_FAILED`/`MISSION_PASSED` banners, new `top_left_help` / subtitle changes, rapid `health_drop`, target reached, or `max_duration_s` timeout.

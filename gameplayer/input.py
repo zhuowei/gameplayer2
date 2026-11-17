@@ -203,14 +203,44 @@ def normalize_button_name(button: str) -> str:
     return norm
 
 
+def _compute_safe_anchor(
+    pos_x: float,
+    pos_y: float,
+    dx: int,
+    dy: int,
+    cx: float,
+    cy: float,
+    margin_x: float,
+    margin_y: float,
+) -> tuple[float, float, bool]:
+    """Return `(base_x, base_y, needs_warp)` keeping cursor inside central bounds."""
+    nx = pos_x + dx
+    ny = pos_y + dy
+    if (
+        abs(nx - cx) > margin_x
+        or abs(ny - cy) > margin_y
+        or abs(pos_x - cx) > margin_x
+        or abs(pos_y - cy) > margin_y
+    ):
+        return (cx, cy, True)
+    return (pos_x, pos_y, False)
+
+
 class CGEventInputBackend:
     """macOS Quartz CGEvent HID input backend. ONLY `player` may use this on the live game."""
 
-    def __init__(self, target_pid: Optional[int] = None) -> None:
+    def __init__(
+        self,
+        target_pid: Optional[int] = None,
+        anchor_bounds: Optional[tuple[float, float, float, float]] = None,
+    ) -> None:
         import Quartz  # noqa: F401
 
         self._quartz = Quartz
         self._target_pid = target_pid
+        self._anchor_bounds: Optional[tuple[float, float, float, float]] = None
+        if anchor_bounds is not None:
+            self.set_anchor_bounds(*anchor_bounds)
         self._source = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
         # Prevent macOS from dropping synthetic events after any boundary recenter.
         Quartz.CGEventSourceSetLocalEventsSuppressionInterval(self._source, 0.0)
@@ -224,6 +254,36 @@ class CGEventInputBackend:
             "ralt": Quartz.kCGEventFlagMaskAlternate,
             "lcmd": Quartz.kCGEventFlagMaskCommand,
         }
+
+    def set_anchor_bounds(self, x: float, y: float, width: float, height: float) -> None:
+        """Anchor cursor recentering inside the game window bounds `(x, y, width, height)`."""
+        if width <= 0 or height <= 0:
+            raise ValueError(f"anchor_bounds width/height must be positive, got {(width, height)}")
+        self._anchor_bounds = (float(x), float(y), float(width), float(height))
+
+    def _center_and_margins(self) -> tuple[float, float, float, float]:
+        if self._anchor_bounds is not None:
+            wx, wy, ww, wh = self._anchor_bounds
+            return (
+                wx + ww * 0.5,
+                wy + wh * 0.5,
+                max(80.0, ww * 0.35),
+                max(60.0, wh * 0.35),
+            )
+        q = self._quartz
+        bounds = q.CGDisplayBounds(q.CGMainDisplayID())
+        return (
+            float(bounds.origin.x + bounds.size.width * 0.5),
+            float(bounds.origin.y + bounds.size.height * 0.5),
+            max(200.0, float(bounds.size.width) * 0.26),
+            max(120.0, float(bounds.size.height) * 0.26),
+        )
+
+    def warp_to_center(self) -> tuple[float, float]:
+        """Warp the macOS cursor to the game-window (or display) center."""
+        cx, cy, _, _ = self._center_and_margins()
+        self._quartz.CGWarpMouseCursorPosition((cx, cy))
+        return (cx, cy)
 
     def _modifier_flags(self) -> int:
         flags = 0
@@ -245,25 +305,23 @@ class CGEventInputBackend:
         return q.CGEventGetLocation(probe)
 
     def _safe_base_pos(self, dx: int, dy: int) -> tuple[float, float]:
-        """Keep synthetic mouse cursor inside central display bounds so deltas never clamp at screen edges."""
+        """Keep synthetic mouse cursor inside central game-window (or display) bounds so deltas never clamp."""
         q = self._quartz
         pos = self._cursor_pos()
-        bounds = q.CGDisplayBounds(q.CGMainDisplayID())
-        cx = float(bounds.origin.x + bounds.size.width * 0.5)
-        cy = float(bounds.origin.y + bounds.size.height * 0.5)
-        margin_x = max(200.0, float(bounds.size.width) * 0.26)
-        margin_y = max(120.0, float(bounds.size.height) * 0.26)
-        nx = float(pos.x) + dx
-        ny = float(pos.y) + dy
-        if (
-            abs(nx - cx) > margin_x
-            or abs(ny - cy) > margin_y
-            or abs(float(pos.x) - cx) > margin_x
-            or abs(float(pos.y) - cy) > margin_y
-        ):
-            q.CGWarpMouseCursorPosition((cx, cy))
-            return (cx, cy)
-        return (float(pos.x), float(pos.y))
+        cx, cy, margin_x, margin_y = self._center_and_margins()
+        bx, by, needs_warp = _compute_safe_anchor(
+            float(pos.x),
+            float(pos.y),
+            dx,
+            dy,
+            cx,
+            cy,
+            margin_x,
+            margin_y,
+        )
+        if needs_warp:
+            q.CGWarpMouseCursorPosition((bx, by))
+        return (bx, by)
 
     def key_down(self, key: str) -> None:
         norm = normalize_key_name(key)
@@ -570,6 +628,23 @@ class InputController:
     def click(self, button: str = "left", duration_s: float = 0.06, timeout_s: Optional[float] = None) -> None:
         """Press and release a single mouse button."""
         self.hold(buttons=[button], duration_s=duration_s, timeout_s=timeout_s)
+
+    def click_window_center(
+        self,
+        window_bounds: Optional[tuple[float, float, float, float]] = None,
+        button: str = "right",
+        hold_s: float = 0.04,
+        timeout_s: Optional[float] = None,
+    ) -> None:
+        """Center cursor inside `window_bounds` (if supported) and click `button` to restore Wine input capture.
+
+        WARNING: Avoid `button="right"` while on the GTA 5 Pause Menu (`right` backs out of menus).
+        """
+        if window_bounds is not None and hasattr(self.backend, "set_anchor_bounds"):
+            self.backend.set_anchor_bounds(*window_bounds)
+        if hasattr(self.backend, "warp_to_center"):
+            self.backend.warp_to_center()
+        self.click(button=button, duration_s=hold_s, timeout_s=timeout_s)
 
     def switch_character(
         self,

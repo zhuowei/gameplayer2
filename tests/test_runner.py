@@ -631,3 +631,96 @@ def test_cover_peek_combat_aborts_exposed_in_cover_when_health_drops_during_duck
     assert res.ticks <= 4
     assert any(r.get("action") == "cover_exposed" for r in read_telemetry(log_path, tool="runner"))
     assert backend.currently_held_buttons == set()
+
+
+def test_activate_wine_capture_syncs_window_bounds_and_clicks_center(tmp_path) -> None:
+    class _BoundRecordingBackend(RecordingInputBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.anchor_bounds: list[tuple[float, float, float, float]] = []
+            self.warp_calls = 0
+
+        def set_anchor_bounds(self, x: float, y: float, width: float, height: float) -> None:
+            self.anchor_bounds.append((x, y, width, height))
+
+        def warp_to_center(self) -> tuple[float, float]:
+            self.warp_calls += 1
+            return (740.0, 560.0)
+
+    class _BoundedWindowBackend(ReplayWindowBackend):
+        def list_windows(self) -> list[WindowInfo]:
+            return [
+                WindowInfo(
+                    window_id=156,
+                    owner="GTA5.exe",
+                    title="Grand Theft Auto V",
+                    pid=1167,
+                    bounds=WindowBounds(100.0, 200.0, 1280.0, 720.0),
+                    is_frontmost=True,
+                )
+            ]
+
+    clock = FakeClock()
+    backend = _BoundRecordingBackend()
+    log_path = tmp_path / "t.jsonl"
+    logger = TelemetryLogger(log_path)
+    ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
+    win_backend = _BoundedWindowBackend(lambda idx: make_synthetic_minimap_frame())
+    runner = ActionRunner(ctrl, win_backend, ScriptedHudOCR(lambda idx: {}), logger, clock, clock.sleep)
+
+    win = runner.activate_wine_capture(button="right", hold_s=0.04)
+    assert win.window_id == 156
+    assert backend.anchor_bounds == [(100.0, 200.0, 1280.0, 720.0)]
+    assert backend.warp_calls == 1
+    assert ("mouse_down", "right") in backend.events
+    assert ("mouse_up", "right") in backend.events
+    assert backend.currently_held_buttons == set()
+    assert any(r.get("action") == "activate_wine_capture" for r in read_telemetry(log_path, tool="runner"))
+
+
+def test_follow_route_on_foot_stuck_recovery_and_moving_no_false_trigger(tmp_path) -> None:
+    # 1) Static frames while walking >= 1.0s trigger sidestep ('a'/'d') + space vault with clean release.
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    log_path = tmp_path / "t.jsonl"
+    logger = TelemetryLogger(log_path)
+    ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
+    stuck_frame = make_synthetic_minimap_frame(yellow_points=[(0.55, 0.35)])
+    runner = ActionRunner(ctrl, ReplayWindowBackend(lambda idx: stuck_frame), ScriptedHudOCR(lambda idx: {}), logger, clock, clock.sleep)
+
+    res = runner.follow_route_on_foot(
+        stuck_window_s=0.8,
+        unstuck_duration_s=0.3,
+        vault_on_stuck=True,
+        config=LoopConfig(max_duration_s=2.0, hz=10.0, hud_check_interval_s=0.0),
+    )
+    assert res.stop_reason == "timeout"
+    assert ("key_down", "d") in backend.events
+    assert ("key_up", "d") in backend.events
+    assert ("key_down", "space") in backend.events
+    assert ("key_up", "space") in backend.events
+    assert backend.currently_held_keys == set()
+    assert any(r.get("action") == "on_foot_stuck_recovery" for r in read_telemetry(log_path, tool="runner"))
+
+    # 2) Moving scene: high visual change does NOT trigger sidestep or vault.
+    clock2 = FakeClock()
+    backend2 = RecordingInputBackend()
+    ctrl2 = InputController(backend=backend2, logger=TelemetryLogger(tmp_path / "t2.jsonl"), clock=clock2, sleep_fn=clock2.sleep, register_signals=False)
+
+    def _moving_frame(idx: int) -> Image.Image:
+        img = make_synthetic_minimap_frame(yellow_points=[(0.50, 0.35)])
+        draw = ImageDraw.Draw(img)
+        shade = 220 if (idx % 2 == 0) else 30
+        draw.rectangle((300, 150, 900, 450), fill=(shade, shade, shade))
+        return img
+
+    runner2 = ActionRunner(ctrl2, ReplayWindowBackend(_moving_frame), ScriptedHudOCR(lambda idx: {}), TelemetryLogger(tmp_path / "t2.jsonl"), clock2, clock2.sleep)
+    runner2.follow_route_on_foot(
+        stuck_window_s=0.6,
+        unstuck_duration_s=0.3,
+        config=LoopConfig(max_duration_s=1.5, hz=10.0, hud_check_interval_s=0.0),
+    )
+    assert ("key_down", "a") not in backend2.events
+    assert ("key_down", "d") not in backend2.events
+    assert ("key_down", "space") not in backend2.events
+    assert backend2.currently_held_keys == set()
