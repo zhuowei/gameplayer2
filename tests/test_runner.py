@@ -316,3 +316,81 @@ def test_shoot_enemies_fires_suppressive_bursts_when_aligned_without_red_reticle
     assert res.stop_reason == "suppressive_shots_done"
     assert ("mouse_down", "left") in backend.events
     assert backend.currently_held_buttons == set()
+
+
+def test_cover_peek_combat_enters_cover_activates_special_and_ducks_on_low_health(tmp_path) -> None:
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    ctrl = InputController(backend=backend, logger=TelemetryLogger(tmp_path / "t.jsonl"), clock=clock, sleep_fn=clock.sleep, register_signals=False)
+
+    f_healthy_enemy = _with_center_reticle(
+        make_synthetic_minimap_frame(health_ratio=0.80, special_ratio=0.75, red_points=[(0.50, 0.40)]),
+        (245, 30, 30),
+    )
+    f_low_hp = make_synthetic_minimap_frame(health_ratio=0.30, special_ratio=0.50, red_points=[(0.50, 0.40)])
+    f_healed_clear = make_synthetic_minimap_frame(health_ratio=0.60, special_ratio=0.40, red_points=[])
+    frames = [f_healthy_enemy, f_low_hp, f_low_hp, f_healed_clear, f_healed_clear]
+
+    win_backend = ReplayWindowBackend(lambda idx: frames[min(idx, len(frames) - 1)])
+    runner = ActionRunner(ctrl, win_backend, ScriptedHudOCR(lambda idx: {}), TelemetryLogger(tmp_path / "t.jsonl"), clock, clock.sleep)
+
+    res = runner.cover_peek_combat(
+        enter_cover=True,
+        use_special=True,
+        min_peek_health=0.45,
+        duck_heal_s=0.25,
+        max_shots=5,
+        empty_scans_to_stop=2,
+        config=LoopConfig(max_duration_s=5.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert res.stop_reason == "enemies_cleared"
+    assert ("key_down", "q") in backend.events
+    assert ("key_up", "q") in backend.events
+    assert ("key_down", "capslock") in backend.events
+    assert ("key_up", "capslock") in backend.events
+    assert ("mouse_down", "right") in backend.events
+    # Must duck (release right mouse) when health drops below min_peek_health
+    assert backend.events.count(("mouse_up", "right")) >= 2
+    assert backend.currently_held_buttons == set()
+    assert backend.currently_held_keys == set()
+
+
+def test_follow_gps_drive_stuck_recovery_and_moving_no_false_trigger(tmp_path) -> None:
+    # 1) Stuck scenario: identical frames for > 1.5s triggers reverse ('s') + counter-steer
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    ctrl = InputController(backend=backend, logger=TelemetryLogger(tmp_path / "t.jsonl"), clock=clock, sleep_fn=clock.sleep, register_signals=False)
+    stuck_frame = make_synthetic_minimap_frame(yellow_points=[(0.55, 0.35)])
+    win_backend = ReplayWindowBackend(lambda idx: stuck_frame)
+    runner = ActionRunner(ctrl, win_backend, ScriptedHudOCR(lambda idx: {}), TelemetryLogger(tmp_path / "t.jsonl"), clock, clock.sleep)
+
+    res = runner.follow_gps_drive(
+        stuck_window_s=1.0,
+        reverse_duration_s=0.4,
+        config=LoopConfig(max_duration_s=2.5, hz=10.0, hud_check_interval_s=0.0),
+    )
+    assert res.stop_reason == "timeout"
+    assert ("key_down", "s") in backend.events
+    assert ("key_up", "s") in backend.events
+    assert backend.currently_held_keys == set()
+
+    # 2) Moving scenario: high visual change in road band does NOT trigger reverse ('s')
+    clock2 = FakeClock()
+    backend2 = RecordingInputBackend()
+    ctrl2 = InputController(backend=backend2, logger=TelemetryLogger(tmp_path / "t2.jsonl"), clock=clock2, sleep_fn=clock2.sleep, register_signals=False)
+
+    def _moving_frame(idx: int) -> Image.Image:
+        img = make_synthetic_minimap_frame(yellow_points=[(0.50, 0.35)])
+        draw = ImageDraw.Draw(img)
+        shade = 220 if (idx % 2 == 0) else 30
+        draw.rectangle((300, 150, 900, 450), fill=(shade, shade, shade))
+        return img
+
+    runner2 = ActionRunner(ctrl2, ReplayWindowBackend(_moving_frame), ScriptedHudOCR(lambda idx: {}), TelemetryLogger(tmp_path / "t2.jsonl"), clock2, clock2.sleep)
+    runner2.follow_gps_drive(
+        stuck_window_s=0.6,
+        reverse_duration_s=0.4,
+        config=LoopConfig(max_duration_s=1.5, hz=10.0, hud_check_interval_s=0.0),
+    )
+    assert ("key_down", "s") not in backend2.events
+    assert backend2.currently_held_keys == set()

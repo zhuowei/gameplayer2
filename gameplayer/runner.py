@@ -103,7 +103,26 @@ class LoopConfig:
     stop_on_banner: bool = True
     stop_on_help_change: bool = True
     stop_on_subtitle_change: bool = False
-    health_drop_threshold: float = 0.15
+    health_drop_threshold: Optional[float] = 0.15
+
+
+def _road_gray_sample(image: Image.Image) -> np.ndarray:
+    """Return downsampled grayscale upper/road region for fast frame-motion detection."""
+    w, h = image.size
+    crop = image.crop(
+        (
+            int(round(w * 0.15)),
+            int(round(h * 0.15)),
+            int(round(w * 0.85)),
+            int(round(h * 0.72)),
+        )
+    )
+    small = crop.convert("L").resize((80, 45), Image.Resampling.BILINEAR)
+    return np.asarray(small, dtype=np.int16)
+
+
+def _road_motion_score(prev_gray: np.ndarray, cur_gray: np.ndarray) -> float:
+    return float(np.mean(np.abs(cur_gray - prev_gray)))
 
 
 @dataclass(frozen=True)
@@ -206,7 +225,7 @@ class ActionRunner:
                     mm = inspect_minimap(cap.image, logger=self._logger)
                     last_minimap = mm
 
-                    if mm.minimap_visible:
+                    if mm.minimap_visible and config.health_drop_threshold is not None:
                         if baseline_health is None:
                             baseline_health = mm.health_ratio
                         elif (baseline_health - mm.health_ratio) >= config.health_drop_threshold:
@@ -362,10 +381,19 @@ class ActionRunner:
         arrive_distance: float = 0.07,
         steer_deadband: float = 0.08,
         sharp_turn_threshold: float = 0.45,
+        enable_stuck_recovery: bool = True,
+        stuck_window_s: float = 1.5,
+        stuck_motion_threshold: float = 3.0,
+        reverse_duration_s: float = 0.8,
         config: Optional[LoopConfig] = None,
     ) -> LoopResult:
-        """Drive along minimap GPS route by modulating throttle, steering (A/D), and sharp-turn brake."""
+        """Drive along minimap GPS route with steering, sharp-turn braking, and stuck-car reverse recovery."""
         cfg = config or LoopConfig(max_duration_s=12.0, hz=10.0)
+        prev_gray: Optional[np.ndarray] = None
+        last_motion_check_t: Optional[float] = None
+        low_motion_elapsed_s = 0.0
+        last_bearing = 0.0
+        recovery_count = 0
 
         def _set_key(key: str, want_down: bool) -> None:
             is_down = key in self.input.held_keys
@@ -374,7 +402,34 @@ class ActionRunner:
             elif not want_down and is_down:
                 self.input.key_up(key)
 
+        def _perform_stuck_recovery() -> None:
+            nonlocal recovery_count, low_motion_elapsed_s, prev_gray
+            recovery_count += 1
+            counter_steer = steer_right_key if (last_bearing < 0 or recovery_count % 2 == 0) else steer_left_key
+            _set_key(throttle_key, False)
+            _set_key(steer_left_key, False)
+            _set_key(steer_right_key, False)
+            _set_key(brake_key, True)
+            _set_key(counter_steer, True)
+            self._logger.log(
+                tool="runner",
+                action="stuck_recovery",
+                status="ok",
+                details={"attempt": recovery_count, "counter_steer": counter_steer, "duration_s": reverse_duration_s},
+            )
+            step = 0.1
+            rem = max(0.0, reverse_duration_s)
+            while rem > 0:
+                dt = min(step, rem)
+                self._sleep(dt)
+                rem -= dt
+            _set_key(counter_steer, False)
+            _set_key(brake_key, False)
+            low_motion_elapsed_s = 0.0
+            prev_gray = None
+
         def _on_tick(state: FrameState) -> Optional[str]:
+            nonlocal prev_gray, last_motion_check_t, low_motion_elapsed_s, last_bearing
             mm = state.minimap
             targets = mm.targets.get(route_color, ())
             target = targets[0] if targets else mm.primary_objective
@@ -389,6 +444,31 @@ class ActionRunner:
             elif target is not None:
                 bearing = target.bearing
 
+            if bearing is not None:
+                last_bearing = bearing
+
+            sharp = bearing is not None and abs(bearing) >= sharp_turn_threshold
+            if enable_stuck_recovery and not sharp:
+                cur_gray = _road_gray_sample(state.capture.image)
+                if prev_gray is not None and last_motion_check_t is not None:
+                    dt = max(0.0, state.elapsed_s - last_motion_check_t)
+                    motion = _road_motion_score(prev_gray, cur_gray)
+                    if motion < stuck_motion_threshold:
+                        low_motion_elapsed_s += dt
+                    else:
+                        low_motion_elapsed_s = 0.0
+                prev_gray = cur_gray
+                last_motion_check_t = state.elapsed_s
+
+                if low_motion_elapsed_s >= stuck_window_s and (cfg.max_duration_s - state.elapsed_s) > 0.25:
+                    _perform_stuck_recovery()
+                    _set_key(throttle_key, True)
+                    return None
+            else:
+                low_motion_elapsed_s = 0.0
+                prev_gray = None
+                last_motion_check_t = state.elapsed_s
+
             if bearing is None:
                 _set_key(steer_left_key, False)
                 _set_key(steer_right_key, False)
@@ -398,7 +478,6 @@ class ActionRunner:
 
             _set_key(steer_left_key, bearing < -steer_deadband)
             _set_key(steer_right_key, bearing > steer_deadband)
-            sharp = abs(bearing) >= sharp_turn_threshold
             _set_key(throttle_key, not sharp)
             _set_key(brake_key, sharp)
             return None
@@ -409,6 +488,13 @@ class ActionRunner:
             on_tick=_on_tick,
             initial_keys=(throttle_key,),
         )
+
+    def _tap_key_preserving_held(self, key: str, hold_s: float = 0.08) -> None:
+        self.input.key_down(key)
+        try:
+            self._sleep(hold_s)
+        finally:
+            self.input.key_up(key)
 
     def _fire_bursts(self, fire_button: str, bursts: int = 1, hold_s: float = 0.03, gap_s: float = 0.03) -> None:
         for idx in range(max(1, bursts)):
@@ -617,10 +703,13 @@ class ActionRunner:
         max_shots: int = 8,
         empty_scans_to_stop: int = 12,
         fallback_fire_on_aligned: bool = True,
+        use_special: bool = False,
         config: Optional[LoopConfig] = None,
     ) -> LoopResult:
         """Multi-target combat loop: red-reticle precision shots + aligned suppressive bursts."""
         cfg = config or LoopConfig(max_duration_s=10.0, hz=10.0, hud_check_interval_s=0.25)
+        if use_special:
+            self._tap_key_preserving_held("capslock", hold_s=0.08)
         return self.aim_until_red_reticle(
             fire_on_lock=True,
             bursts=2,
@@ -631,4 +720,133 @@ class ActionRunner:
             fallback_fire_interval_ticks=6,
             reacquire_aim_interval_ticks=18,
             config=cfg,
+        )
+
+    def cover_peek_combat(
+        self,
+        enter_cover: bool = True,
+        use_special: bool = True,
+        min_peek_health: float = 0.45,
+        peek_burst_s: float = 2.0,
+        duck_heal_s: float = 1.2,
+        max_shots: int = 8,
+        empty_scans_to_stop: int = 12,
+        aim_button: str = "right",
+        fire_button: str = "left",
+        steer_gain: float = 220.0,
+        bearing_deadband: float = 0.10,
+        aim_settle_s: float = 0.18,
+        scan_pattern: Sequence[tuple[int, int]] = DEFAULT_RETICLE_SWEEP,
+        config: Optional[LoopConfig] = None,
+    ) -> LoopResult:
+        """Cover-peek combat loop with automatic low-health ducking, special activation, and turn-gap cover."""
+        cfg = config or LoopConfig(
+            max_duration_s=10.0,
+            hz=10.0,
+            hud_check_interval_s=0.25,
+            health_drop_threshold=None,
+        )
+        if enter_cover:
+            self._tap_key_preserving_held("q", hold_s=0.08)
+
+        special_triggered = False
+        is_peeking = False
+        peek_start_t = 0.0
+        duck_until_t = 0.0
+        sweep_idx = 0
+        shots_fired = 0
+        no_enemy_ticks = 0
+        aligned_ticks = 0
+
+        def _set_peek(want_peek: bool, now_t: float) -> None:
+            nonlocal is_peeking, peek_start_t
+            if want_peek and not is_peeking:
+                self.input.mouse_down(aim_button)
+                is_peeking = True
+                peek_start_t = now_t
+                if aim_settle_s > 0:
+                    self._sleep(aim_settle_s)
+            elif not want_peek and is_peeking:
+                self.input.mouse_up(aim_button)
+                is_peeking = False
+
+        def _on_tick(state: FrameState) -> Optional[str]:
+            nonlocal special_triggered, duck_until_t, sweep_idx, shots_fired, no_enemy_ticks, aligned_ticks
+            mm = state.minimap
+            now_t = state.elapsed_s
+
+            if use_special and not special_triggered and mm.minimap_visible and mm.special_ratio >= 0.20:
+                self._tap_key_preserving_held("capslock", hold_s=0.08)
+                special_triggered = True
+
+            # Duck back into cover if health is below safe threshold
+            if mm.minimap_visible and mm.health_ratio < min_peek_health:
+                _set_peek(False, now_t)
+                duck_until_t = max(duck_until_t, now_t + duck_heal_s)
+                self._logger.log(
+                    tool="runner",
+                    action="cover_duck",
+                    status="ok",
+                    details={"health_ratio": round(mm.health_ratio, 3)},
+                )
+                return None
+
+            if now_t < duck_until_t:
+                _set_peek(False, now_t)
+                return None
+
+            # Limit continuous exposure during peek bursts
+            if is_peeking and (now_t - peek_start_t) >= peek_burst_s:
+                _set_peek(False, now_t)
+                duck_until_t = now_t + 0.35
+                return None
+
+            _set_peek(True, now_t)
+
+            reticle = detect_red_reticle(state.capture.image)
+            if reticle.is_red:
+                no_enemy_ticks = 0
+                aligned_ticks = 0
+                self._fire_bursts(fire_button, bursts=2, hold_s=0.03, gap_s=0.03)
+                shots_fired += 1
+                if shots_fired >= max_shots:
+                    return "reticle_shots_done"
+                return None
+
+            enemy = mm.nearest_enemy
+            if enemy is not None and abs(enemy.bearing) > bearing_deadband:
+                no_enemy_ticks = 0
+                aligned_ticks = 0
+                dx = int(round(max(-220.0, min(220.0, enemy.bearing * steer_gain))))
+                if dx != 0:
+                    self.input.mouse_delta(dx, 0, steps=1, duration_s=0.0)
+                    if abs(dx) >= 30:
+                        sweep_idx = 0
+                return None
+
+            if enemy is None:
+                no_enemy_ticks += 1
+                aligned_ticks = 0
+                if no_enemy_ticks >= empty_scans_to_stop:
+                    return "enemies_cleared"
+            else:
+                no_enemy_ticks = 0
+                aligned_ticks += 1
+                if aligned_ticks % 6 == 0:
+                    self._fire_bursts(fire_button, bursts=2, hold_s=0.03, gap_s=0.03)
+                    shots_fired += 1
+                    if shots_fired >= max_shots:
+                        return "suppressive_shots_done"
+
+            if scan_pattern:
+                dx, dy = scan_pattern[sweep_idx % len(scan_pattern)]
+                sweep_idx += 1
+                if dx != 0 or dy != 0:
+                    self.input.mouse_delta(dx, dy, steps=1, duration_s=0.0)
+            return None
+
+        return self._run_loop(
+            mode_name="cover_peek_combat",
+            config=cfg,
+            on_tick=_on_tick,
         )

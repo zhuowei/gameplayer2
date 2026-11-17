@@ -23,6 +23,7 @@ NormalizedBox = tuple[float, float, float, float]
 MINIMAP_RADAR_BOX: NormalizedBox = (0.0156, 0.805, 0.1563, 0.966)
 HEALTH_BAR_BOX: NormalizedBox = (0.0156, 0.970, 0.0855, 0.981)
 ARMOR_BAR_BOX: NormalizedBox = (0.0875, 0.970, 0.1200, 0.981)
+SPECIAL_BAR_BOX: NormalizedBox = (0.1225, 0.970, 0.1558, 0.981)
 PLAYER_ANCHOR_REL: tuple[float, float] = (0.50, 0.77)
 
 
@@ -55,6 +56,7 @@ class MinimapObservation:
     nearest_enemy: Optional[RadarTarget]
     yellow_route_bearing: Optional[float]
     purple_route_bearing: Optional[float]
+    special_ratio: float = 0.0
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -62,6 +64,7 @@ class MinimapObservation:
             "minimap_visible": self.minimap_visible,
             "health_ratio": round(float(self.health_ratio), 4),
             "armor_ratio": round(float(self.armor_ratio), 4),
+            "special_ratio": round(float(self.special_ratio), 4),
             "primary_objective": self.primary_objective.to_dict() if self.primary_objective else None,
             "nearest_enemy": self.nearest_enemy.to_dict() if self.nearest_enemy else None,
             "yellow_route_bearing": (
@@ -102,6 +105,17 @@ def _extract_armor_ratio(bar_rgb: np.ndarray) -> float:
     b = bar_rgb[:, :, 2].astype(np.int16)
     blue_mask = (b - r > 15) & (b > 85) & (np.maximum(np.maximum(r, g), b) - np.minimum(np.minimum(r, g), b) > 18)
     col_active = np.any(blue_mask, axis=0)
+    if col_active.size == 0:
+        return 0.0
+    return float(np.mean(col_active))
+
+
+def _extract_special_ratio(bar_rgb: np.ndarray) -> float:
+    r = bar_rgb[:, :, 0].astype(np.int16)
+    g = bar_rgb[:, :, 1].astype(np.int16)
+    b = bar_rgb[:, :, 2].astype(np.int16)
+    yellow_mask = (r >= 65) & (g >= 55) & ((r - b) >= 28) & ((g - b) >= 20)
+    col_active = np.any(yellow_mask, axis=0)
     if col_active.size == 0:
         return 0.0
     return float(np.mean(col_active))
@@ -225,10 +239,12 @@ def inspect_minimap(
 
         health_bar = _crop_box(arr, HEALTH_BAR_BOX)
         armor_bar = _crop_box(arr, ARMOR_BAR_BOX)
+        special_bar = _crop_box(arr, SPECIAL_BAR_BOX)
         radar_rgb = _crop_box(arr, MINIMAP_RADAR_BOX)
 
         health_ratio = _extract_health_ratio(health_bar)
         armor_ratio = _extract_armor_ratio(armor_bar)
+        special_ratio = _extract_special_ratio(special_bar)
         minimap_visible = (health_ratio > 0.03) or (armor_ratio > 0.03)
 
         masks = _color_masks(radar_rgb)
@@ -253,6 +269,7 @@ def inspect_minimap(
             minimap_visible=minimap_visible,
             health_ratio=health_ratio,
             armor_ratio=armor_ratio,
+            special_ratio=special_ratio,
             targets=targets,
             primary_objective=primary_objective,
             nearest_enemy=nearest_enemy,
@@ -264,6 +281,7 @@ def inspect_minimap(
                 "minimap_visible": minimap_visible,
                 "health_ratio": round(health_ratio, 3),
                 "armor_ratio": round(armor_ratio, 3),
+                "special_ratio": round(special_ratio, 3),
                 "enemy_count": len(red_targets),
                 "yellow_count": len(yellow_targets),
             }

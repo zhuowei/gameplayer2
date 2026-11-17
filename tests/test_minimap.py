@@ -10,6 +10,7 @@ from gameplayer.minimap import (
     HEALTH_BAR_BOX,
     MINIMAP_RADAR_BOX,
     PLAYER_ANCHOR_REL,
+    SPECIAL_BAR_BOX,
     inspect_minimap,
     main as minimap_cli_main,
 )
@@ -19,6 +20,7 @@ from gameplayer.telemetry import TelemetryLogger
 def make_synthetic_minimap_frame(
     health_ratio: float = 1.0,
     armor_ratio: float = 0.5,
+    special_ratio: float = 0.0,
     yellow_points: list[tuple[float, float]] = (),
     purple_points: list[tuple[float, float]] = (),
     red_points: list[tuple[float, float]] = (),
@@ -66,6 +68,18 @@ def make_synthetic_minimap_frame(
         fill_x = ax0 + max(1, int(round((ax1 - ax0) * min(1.0, armor_ratio))))
         draw.rectangle((ax0, ay0, fill_x, ay1), fill=(65, 145, 220))
 
+    # Special bar
+    sx0, sy0, sx1, sy1 = [
+        int(round(SPECIAL_BAR_BOX[0] * w)),
+        int(round(SPECIAL_BAR_BOX[1] * h)),
+        int(round(SPECIAL_BAR_BOX[2] * w)),
+        int(round(SPECIAL_BAR_BOX[3] * h)),
+    ]
+    draw.rectangle((sx0, sy0, sx1, sy1), fill=(24, 23, 16))
+    if special_ratio > 0:
+        fill_x = sx0 + max(1, int(round((sx1 - sx0) * min(1.0, special_ratio))))
+        draw.rectangle((sx0, sy0, fill_x, sy1), fill=(155, 130, 45))
+
     rw = rx1 - rx0
     rh = ry1 - ry0
 
@@ -92,6 +106,7 @@ def test_minimap_health_armor_and_blips(tmp_path) -> None:
     frame = make_synthetic_minimap_frame(
         health_ratio=0.75,
         armor_ratio=0.50,
+        special_ratio=0.80,
         yellow_points=[(0.75, 0.40)],
         red_points=[(0.30, 0.45)],
         blue_points=[(0.35, 0.88)],
@@ -100,6 +115,7 @@ def test_minimap_health_armor_and_blips(tmp_path) -> None:
     assert obs.minimap_visible is True
     assert 0.70 <= obs.health_ratio <= 0.80
     assert 0.44 <= obs.armor_ratio <= 0.56
+    assert 0.74 <= obs.special_ratio <= 0.86
     assert obs.primary_objective is not None
     assert obs.primary_objective.kind == "yellow"
     assert obs.primary_objective.bearing > 0.1
