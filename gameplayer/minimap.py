@@ -177,6 +177,7 @@ def _extract_components(
     visited: set[tuple[int, int]] = set()
     targets: list[RadarTarget] = []
 
+    step = 1 if kind in ("red", "blue") else 2
     for start in active:
         if start in visited:
             continue
@@ -186,8 +187,8 @@ def _extract_components(
         while queue:
             cy, cx = queue.popleft()
             comp.append((cy, cx))
-            for ny in range(cy - 2, cy + 3):
-                for nx in range(cx - 2, cx + 3):
+            for ny in range(cy - step, cy + step + 1):
+                for nx in range(cx - step, cx + step + 1):
                     nb = (ny, nx)
                     if nb in active and nb not in visited:
                         visited.add(nb)

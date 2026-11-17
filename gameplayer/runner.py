@@ -17,26 +17,19 @@ from gameplayer.window import CaptureResult, WindowBackend, WindowInfo, capture_
 
 
 DEFAULT_RETICLE_SWEEP: tuple[tuple[int, int], ...] = (
-    (0, 0),
-    (18, 0),
-    (18, 0),
-    (-54, 0),
-    (-18, 0),
-    (36, -22),
-    (18, 0),
-    (18, 0),
-    (-54, 0),
-    (-18, 0),
-    (36, -26),
+    (0, -34),
     (18, 0),
     (-36, 0),
-    (18, -26),
+    (18, -20),
+    (20, 0),
+    (-40, 0),
+    (20, -18),
     (24, 0),
     (-48, 0),
-    (24, 84),
+    (24, 38),
     (24, 0),
     (-48, 0),
-    (24, -10),
+    (24, 34),
 )
 
 
@@ -464,6 +457,14 @@ class ActionRunner:
             self.input.key_up("s")
 
     @staticmethod
+    def _select_cycle_target(red_targets: Sequence[Any], target_idx: int) -> Any:
+        if not red_targets:
+            return None
+        in_fov = [t for t in red_targets if abs(t.bearing) <= 0.45]
+        pool = in_fov if in_fov else red_targets
+        return pool[target_idx % len(pool)]
+
+    @staticmethod
     def _resolve_route_target_and_bearing(
         mm: MinimapObservation,
         target_color: str,
@@ -658,6 +659,8 @@ class ActionRunner:
         sweep_offset_x = 0
         sweep_offset_y = 0
         aligned_ticks = 0
+        target_idx = 0
+        no_lock_ticks = 0
 
         def _set_key(key: str, want_down: bool) -> None:
             is_down = key in self.input.held_keys
@@ -695,7 +698,7 @@ class ActionRunner:
                 self.input.mouse_up("right")
 
         def _on_tick(state: FrameState) -> Optional[str]:
-            nonlocal phase, phase_end_t, min_move_until_t, engage_cooldown_until_t, engage_start_t, recover_cooldown_until_t, tether_active_until_t, recover_start_health, retreat_start_health, special_triggered, prev_gray, last_motion_check_t, low_motion_elapsed_s, last_bearing, recovery_count, sweep_idx, sweep_offset_x, sweep_offset_y, aligned_ticks
+            nonlocal phase, phase_end_t, min_move_until_t, engage_cooldown_until_t, engage_start_t, recover_cooldown_until_t, tether_active_until_t, recover_start_health, retreat_start_health, special_triggered, prev_gray, last_motion_check_t, low_motion_elapsed_s, last_bearing, recovery_count, sweep_idx, sweep_offset_x, sweep_offset_y, aligned_ticks, target_idx, no_lock_ticks
             now_t = state.elapsed_s
             mm = state.minimap
 
@@ -724,7 +727,9 @@ class ActionRunner:
 
             blue_targets = mm.targets.get("blue", ())
             blue_ally = blue_targets[0] if blue_targets else None
-            enemy = mm.nearest_enemy
+            nearest_enemy = mm.nearest_enemy
+            point_blank_enemy = nearest_enemy is not None and nearest_enemy.distance < 0.18
+            enemy = nearest_enemy if point_blank_enemy else self._select_cycle_target(mm.targets["red"], target_idx)
 
             def _resume_move_from_recover(*, tether: bool = False, cooldown_s: float = 0.0) -> None:
                 nonlocal phase, phase_end_t, min_move_until_t, engage_cooldown_until_t
@@ -744,13 +749,14 @@ class ActionRunner:
                 _reset_motion_tracker()
 
             def _enter_engage_phase(*, cooldown_s: float = 0.0) -> None:
-                nonlocal phase, phase_end_t, engage_start_t, aligned_ticks, sweep_idx, sweep_offset_x, sweep_offset_y
+                nonlocal phase, phase_end_t, engage_start_t, aligned_ticks, no_lock_ticks, sweep_idx, sweep_offset_x, sweep_offset_y
                 nonlocal recover_cooldown_until_t, recover_start_health
                 _set_movement(False)
                 phase = "engage"
                 engage_start_t = now_t
                 phase_end_t = now_t + engage_phase_s
                 aligned_ticks = 0
+                no_lock_ticks = 0
                 sweep_idx = 0
                 sweep_offset_x = 0
                 sweep_offset_y = 0
@@ -773,7 +779,6 @@ class ActionRunner:
                 )
                 return "low_health"
 
-            point_blank_enemy = enemy is not None and enemy.distance < 0.18
             can_retreat_to_ally = (
                 (not point_blank_enemy)
                 and (now_t >= tether_active_until_t)
@@ -901,9 +906,9 @@ class ActionRunner:
                 nav_bearing = blue_ally.bearing
             elif route_bearing is not None:
                 nav_bearing = route_bearing
-            elif blue_ally is not None and blue_ally.distance > 0.14:
+            elif blue_ally is not None and blue_ally.distance > 0.14 and abs(blue_ally.bearing) <= 0.45:
                 nav_bearing = blue_ally.bearing
-            elif enemy is not None and enemy.distance > 0.35:
+            elif enemy is not None and enemy.distance > 0.22:
                 nav_bearing = enemy.bearing
             else:
                 nav_bearing = None
@@ -945,6 +950,20 @@ class ActionRunner:
                     phase_end_t = min(now_t + 1.5, engage_start_t + max_engage_hold_s)
                 else:
                     _set_aim(False)
+                    if (
+                        now_t >= phase_end_t
+                        and (not need_ally_tether)
+                        and route_bearing is None
+                        and len(mm.targets["red"]) >= 2
+                        and enemy is not None
+                        and enemy.distance <= 0.32
+                    ):
+                        recovery_count += 1
+                        target_idx += 1
+                        no_lock_ticks = 0
+                        self._perform_on_foot_sidestep(recovery_count, enemy.bearing, 0.35, False)
+                        _enter_engage_phase()
+                        return None
                     phase = "move"
                     phase_end_t = now_t + move_phase_s
                     min_move_until_t = now_t + move_phase_s
@@ -957,6 +976,7 @@ class ActionRunner:
                 reticle = detect_red_reticle(state.capture.image)
                 if reticle.is_red:
                     aligned_ticks = 0
+                    no_lock_ticks = 0
                     self._fire_bursts("left", bursts=3, hold_s=0.03, gap_s=0.025, reason="red_reticle")
                     if recoil_comp_dy > 0:
                         self.input.mouse_delta(0, int(recoil_comp_dy), steps=1, duration_s=0.01)
@@ -967,12 +987,16 @@ class ActionRunner:
                         dx = self._ads_steer_dx(enemy.bearing, steer_gain=engage_steer_gain)
                         if dx != 0:
                             self._steer_camera(dx, 0)
+                    no_lock_ticks += 1
+                    if no_lock_ticks >= 16:
+                        no_lock_ticks = 0
+                        target_idx += 1
+                        _recenter_sweep()
+                        return None
                     if abs(enemy.bearing) <= engage_align_bearing:
                         aligned_ticks += 1
-                        if aligned_ticks % 5 == 0:
+                        if no_lock_ticks in (6, 12):
                             self._fire_bursts("left", bursts=2, hold_s=0.03, gap_s=0.03, reason="suppressive")
-                            if recoil_comp_dy > 0:
-                                self.input.mouse_delta(0, int(recoil_comp_dy), steps=1, duration_s=0.01)
                     else:
                         aligned_ticks = 0
 
@@ -1471,7 +1495,7 @@ class ActionRunner:
         heal_wait_s: float = 3.5,
         duck_heal_s: Optional[float] = None,
         exit_on_health_drop: bool = False,
-        peek_burst_s: float = 2.0,
+        peek_burst_s: float = 2.6,
         max_shots: Optional[int] = None,
         stop_when_no_enemies: bool = True,
         no_enemies_clear_s: float = 1.5,
@@ -1532,6 +1556,8 @@ class ActionRunner:
         no_enemy_ticks = 0
         no_enemy_since_t: Optional[float] = None
         aligned_ticks = 0
+        target_idx = 0
+        no_lock_ticks = 0
         steer_cadence_ticks = 0
         large_steer_ticks = 0
         clamped_ticks = 0
@@ -1563,7 +1589,7 @@ class ActionRunner:
                 is_peeking = False
 
         def _on_tick(state: FrameState) -> Optional[str]:
-            nonlocal special_triggered, duck_until_t, duck_logged, duck_reason_heal, duck_start_health, peak_health, sweep_idx, sweep_offset_x, sweep_offset_y, shots_fired, no_enemy_ticks, no_enemy_since_t, aligned_ticks, steer_cadence_ticks, large_steer_ticks, clamped_ticks, unclamp_attempts, flank_stage2_done, toggled_cover_for_flank, pre_flank_bearing, last_clamped_bearing
+            nonlocal special_triggered, duck_until_t, duck_logged, duck_reason_heal, duck_start_health, peak_health, sweep_idx, sweep_offset_x, sweep_offset_y, shots_fired, no_enemy_ticks, no_enemy_since_t, aligned_ticks, target_idx, no_lock_ticks, steer_cadence_ticks, large_steer_ticks, clamped_ticks, unclamp_attempts, flank_stage2_done, toggled_cover_for_flank, pre_flank_bearing, last_clamped_bearing
             mm = state.minimap
             now_t = state.elapsed_s
 
@@ -1634,6 +1660,7 @@ class ActionRunner:
                 no_enemy_ticks = 0
                 no_enemy_since_t = None
                 aligned_ticks = 0
+                no_lock_ticks = 0
                 steer_cadence_ticks = 0
                 large_steer_ticks = 0
                 clamped_ticks = 0
@@ -1647,7 +1674,7 @@ class ActionRunner:
                     return "reticle_shots_done"
                 return None
 
-            enemy = mm.nearest_enemy
+            enemy = self._select_cycle_target(mm.targets["red"], target_idx)
             if enemy is None:
                 steer_cadence_ticks = 0
                 large_steer_ticks = 0
@@ -1657,6 +1684,7 @@ class ActionRunner:
                 if no_enemy_since_t is None:
                     no_enemy_since_t = now_t
                 aligned_ticks = 0
+                no_lock_ticks = 0
                 if stop_when_no_enemies:
                     if empty_scans_to_stop is not None and no_enemy_ticks >= empty_scans_to_stop:
                         _recenter_sweep()
@@ -1780,12 +1808,17 @@ class ActionRunner:
                     steer_cadence_ticks = 0
                     large_steer_ticks = 0
 
+                no_lock_ticks += 1
+                if no_lock_ticks >= 16:
+                    no_lock_ticks = 0
+                    target_idx += 1
+                    _recenter_sweep()
+                    return None
+
                 if abs(enemy.bearing) <= suppressive_max_bearing:
                     aligned_ticks += 1
-                    if aligned_ticks % 3 == 0:
+                    if no_lock_ticks in (6, 12):
                         self._fire_bursts(fire_button, bursts=2, hold_s=0.03, gap_s=0.03, reason="suppressive")
-                        if recoil_comp_dy > 0:
-                            self.input.mouse_delta(0, int(recoil_comp_dy), steps=1, duration_s=0.01)
                         shots_fired += 1
                         if max_shots is not None and shots_fired >= max_shots:
                             _recenter_sweep()

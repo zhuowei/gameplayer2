@@ -233,3 +233,19 @@ def test_minimap_calibrated_bars_and_blue_siren_wash_filtering(tmp_path) -> None
         d2.rectangle((split_x + 1, hy0, hx1, hy1), fill=empty_rgb)
         obs2 = inspect_minimap(img2, logger=TelemetryLogger(tmp_path / "t2.jsonl"))
         assert 0.64 <= obs2.health_ratio <= 0.76
+
+
+def test_minimap_splits_nearby_red_and_blue_blips_without_merging(tmp_path) -> None:
+    # 9px apart (~2px dark gap between 7px blips): step=1 keeps separate targets instead of merging into a phantom gap centroid.
+    frame = make_synthetic_minimap_frame(
+        health_ratio=0.90,
+        red_points=[(0.45, 0.45), (0.50, 0.45), (0.55, 0.45)],
+        blue_points=[(0.45, 0.85), (0.50, 0.85)],
+    )
+    obs = inspect_minimap(frame, logger=TelemetryLogger(tmp_path / "t_split.jsonl"))
+    assert len(obs.targets["red"]) == 3
+    assert len(obs.targets["blue"]) == 2
+    bearings = sorted(t.bearing for t in obs.targets["red"])
+    assert bearings[0] < -0.02
+    assert abs(bearings[1]) < 0.02
+    assert bearings[2] > 0.02
