@@ -991,6 +991,9 @@ class ActionRunner:
         large_steer_ticks = 0
         clamped_ticks = 0
         unclamp_attempts = 0
+        flank_stage2_done = False
+        toggled_cover_for_flank = False
+        pre_flank_bearing: Optional[float] = None
         last_clamped_bearing: Optional[float] = None
 
         def _recenter_sweep() -> None:
@@ -1015,7 +1018,7 @@ class ActionRunner:
                 is_peeking = False
 
         def _on_tick(state: FrameState) -> Optional[str]:
-            nonlocal special_triggered, duck_until_t, duck_logged, duck_reason_heal, duck_start_health, peak_health, sweep_idx, sweep_offset_x, sweep_offset_y, shots_fired, no_enemy_ticks, no_enemy_since_t, aligned_ticks, steer_cadence_ticks, large_steer_ticks, clamped_ticks, unclamp_attempts, last_clamped_bearing
+            nonlocal special_triggered, duck_until_t, duck_logged, duck_reason_heal, duck_start_health, peak_health, sweep_idx, sweep_offset_x, sweep_offset_y, shots_fired, no_enemy_ticks, no_enemy_since_t, aligned_ticks, steer_cadence_ticks, large_steer_ticks, clamped_ticks, unclamp_attempts, flank_stage2_done, toggled_cover_for_flank, pre_flank_bearing, last_clamped_bearing
             mm = state.minimap
             now_t = state.elapsed_s
 
@@ -1120,7 +1123,7 @@ class ActionRunner:
                 no_enemy_ticks = 0
                 no_enemy_since_t = None
 
-                # Flanking / cover-clamped enemy (> 0.45): attempt free-look flank recovery if healthy, else tuck/abort.
+                # Flanking / cover-clamped enemy (> 0.45): 2-stage recovery (free-look+sidestep, then q cover-break + aim turn) if healthy.
                 if abs(enemy.bearing) > 0.45:
                     if (
                         last_clamped_bearing is not None
@@ -1132,17 +1135,15 @@ class ActionRunner:
                         clamped_ticks = 1
                     last_clamped_bearing = enemy.bearing
 
-                    if (
-                        clamped_ticks >= 6
-                        and unclamp_attempts < max_unclamp_attempts
-                        and (not mm.minimap_visible or mm.health_ratio >= flank_recovery_min_health)
-                    ):
+                    healthy_for_flank = not mm.minimap_visible or mm.health_ratio >= flank_recovery_min_health
+                    if clamped_ticks >= 5 and unclamp_attempts < max_unclamp_attempts and healthy_for_flank:
                         _set_peek(False, now_t)
-                        dx = int(round(max(-240.0, min(240.0, enemy.bearing * steer_gain))))
+                        dx = int(round(max(-320.0, min(320.0, enemy.bearing * 450.0))))
                         if dx != 0:
                             self._steer_camera(dx, 0)
                         sidestep_key = "a" if enemy.bearing < 0 else "d"
-                        self._tap_key_preserving_held(sidestep_key, hold_s=0.18)
+                        self._tap_key_preserving_held(sidestep_key, hold_s=0.16)
+                        pre_flank_bearing = enemy.bearing
                         unclamp_attempts += 1
                         clamped_ticks = 0
                         last_clamped_bearing = None
@@ -1152,6 +1153,7 @@ class ActionRunner:
                             action="cover_flank_recovery",
                             status="ok",
                             details={
+                                "stage": 1,
                                 "attempt": unclamp_attempts,
                                 "bearing": round(enemy.bearing, 3),
                                 "sidestep_key": sidestep_key,
@@ -1160,7 +1162,37 @@ class ActionRunner:
                         )
                         return None
 
-                    abort_threshold = 3 if unclamp_attempts > 0 else 8
+                    if (
+                        unclamp_attempts > 0
+                        and not flank_stage2_done
+                        and healthy_for_flank
+                        and pre_flank_bearing is not None
+                        and (abs(pre_flank_bearing) - abs(enemy.bearing)) < 0.12
+                    ):
+                        flank_stage2_done = True
+                        self._tap_key_preserving_held("q", hold_s=0.08)
+                        toggled_cover_for_flank = True
+                        _set_peek(True, now_t)
+                        dx = int(round(max(-320.0, min(320.0, enemy.bearing * 450.0))))
+                        if dx != 0:
+                            self._steer_camera(dx, 0)
+                        clamped_ticks = 0
+                        last_clamped_bearing = None
+                        aligned_ticks = 0
+                        self._logger.log(
+                            tool="runner",
+                            action="cover_flank_recovery",
+                            status="ok",
+                            details={
+                                "stage": 2,
+                                "attempt": unclamp_attempts,
+                                "bearing": round(enemy.bearing, 3),
+                                "dx": dx,
+                            },
+                        )
+                        return None
+
+                    abort_threshold = 2 if flank_stage2_done else (3 if unclamp_attempts > 0 else 8)
                     if clamped_ticks >= abort_threshold:
                         self._logger.log(
                             tool="runner",
@@ -1169,10 +1201,14 @@ class ActionRunner:
                             details={"bearing": round(enemy.bearing, 3)},
                         )
                         _set_peek(False, now_t)
+                        if toggled_cover_for_flank:
+                            self._tap_key_preserving_held("q", hold_s=0.08)
+                            toggled_cover_for_flank = False
                         return "cover_clamped"
                 else:
                     clamped_ticks = 0
                     last_clamped_bearing = None
+                    toggled_cover_for_flank = False
 
                 # Keep aim held in cover (releasing right pulls back into cover and resets cover yaw).
                 if abs(enemy.bearing) > bearing_deadband:

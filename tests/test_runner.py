@@ -737,8 +737,9 @@ def test_cover_peek_combat_flank_recovery_turns_when_healthy_and_skips_when_low_
     f_flank = make_synthetic_minimap_frame(health_ratio=0.85, red_points=[(0.10, 0.77)])
     f_front = _with_center_reticle(make_synthetic_minimap_frame(health_ratio=0.85, red_points=[(0.50, 0.40)]), (245, 30, 30))
     f_clear = make_synthetic_minimap_frame(health_ratio=0.85, red_points=[])
-    # 6 flank ticks trigger recovery on tick 5 -> tick 6 sees enemy ahead and shoots -> ticks 7..9 clear
-    frames = [f_flank] * 6 + [f_front] + [f_clear] * 3
+    # 6 flank ticks trigger stage 1 recovery on tick 4 -> tick 5 sees partial shift (-0.81 -> -0.74, <0.12 progress) -> stage 2 q-break + aim turn -> tick 6 engages & clears
+    f_flank2 = make_synthetic_minimap_frame(health_ratio=0.85, red_points=[(0.14, 0.85)])
+    frames = [f_flank] * 5 + [f_flank2] + [f_front] + [f_clear] * 3
     runner = ActionRunner(ctrl, ReplayWindowBackend(lambda idx: frames[min(idx, len(frames) - 1)]), ScriptedHudOCR(lambda idx: {}), logger, clock, clock.sleep)
 
     res = runner.cover_peek_combat(
@@ -750,8 +751,10 @@ def test_cover_peek_combat_flank_recovery_turns_when_healthy_and_skips_when_low_
     assert res.stop_reason == "enemies_cleared"
     assert ("key_down", "a") in backend.events
     assert ("key_up", "a") in backend.events
+    assert ("key_down", "q") in backend.events
     assert ("mouse_down", "left") in backend.events
-    assert any(r.get("action") == "cover_flank_recovery" for r in read_telemetry(log_path, tool="runner"))
+    recovery_logs = [r for r in read_telemetry(log_path, tool="runner") if r.get("action") == "cover_flank_recovery"]
+    assert [r["details"]["stage"] for r in recovery_logs] == [1, 2]
     assert backend.currently_held_buttons == set()
     assert backend.currently_held_keys == set()
 
