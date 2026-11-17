@@ -906,3 +906,77 @@ def test_advance_under_fire_tethers_to_blue_ally_and_stops_on_target_reached(tmp
     assert any(ev[0] == "mouse_delta" and ev[1][0] < 0 for ev in backend.events)
     assert backend.currently_held_keys == set()
     assert backend.currently_held_buttons == set()
+
+
+def test_advance_under_fire_resets_stuck_timer_across_recover_and_never_vaults_at_low_hp(tmp_path) -> None:
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    log_path = tmp_path / "t.jsonl"
+    logger = TelemetryLogger(log_path)
+    ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
+
+    # Static frames: tick 0 move (0.85), ticks 1..8 recover (0.35 < 0.40, wait=0.8s), then ticks 9..17 move at 0.44 (< 0.50).
+    # Stuck timer must reset on recover exit (no immediate post-recover vault) and vault must stay disabled below 0.50 HP.
+    f_start = make_synthetic_minimap_frame(health_ratio=0.85, yellow_points=[(0.50, 0.25)])
+    f_low = make_synthetic_minimap_frame(health_ratio=0.35, yellow_points=[(0.50, 0.25)])
+    f_mid = make_synthetic_minimap_frame(health_ratio=0.44, yellow_points=[(0.50, 0.25)])
+
+    def _frame(idx: int) -> Image.Image:
+        if idx == 0:
+            return f_start
+        if idx <= 9:
+            return f_low
+        return f_mid
+
+    runner = ActionRunner(ctrl, ReplayWindowBackend(_frame), ScriptedHudOCR(lambda idx: {}), logger, clock, clock.sleep)
+    res = runner.advance_under_fire(
+        recover_wait_s=0.8,
+        stuck_window_s=0.5,
+        unstuck_duration_s=0.2,
+        vault_on_stuck=True,
+        config=LoopConfig(max_duration_s=2.2, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert res.stop_reason == "timeout"
+    assert ("key_down", "space") not in backend.events
+    assert backend.currently_held_keys == set()
+
+
+def test_advance_under_fire_retreats_or_aborts_when_exposed_during_recover(tmp_path) -> None:
+    # 1) Blue ally present: exposed drop during recover triggers retreat sprint toward blue ally.
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    log_path = tmp_path / "t1.jsonl"
+    logger = TelemetryLogger(log_path)
+    ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
+
+    f_rec = make_synthetic_minimap_frame(health_ratio=0.36, yellow_points=[(0.75, 0.35)], blue_points=[(0.20, 0.77)])
+    f_hit = make_synthetic_minimap_frame(health_ratio=0.20, yellow_points=[(0.75, 0.35)], blue_points=[(0.20, 0.77)])
+    f_arr = make_synthetic_minimap_frame(health_ratio=0.50, yellow_points=[(0.50, 0.74)], blue_points=[(0.50, 0.70)])
+    frames = [f_rec, f_hit, f_hit, f_arr]
+    runner = ActionRunner(ctrl, ReplayWindowBackend(lambda idx: frames[min(idx, len(frames) - 1)]), ScriptedHudOCR(lambda idx: {}), logger, clock, clock.sleep)
+    res = runner.advance_under_fire(
+        recover_wait_s=2.5,
+        config=LoopConfig(max_duration_s=3.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert res.stop_reason == "target_reached"
+    assert any(r.get("action") == "advance_retreat" for r in read_telemetry(log_path, tool="runner"))
+    assert ("key_down", "lshift") in backend.events
+    assert backend.currently_held_keys == set()
+
+    # 2) No blue ally: exposed drop < 0.25 HP aborts immediately as "low_health".
+    clock2 = FakeClock()
+    backend2 = RecordingInputBackend()
+    log_path2 = tmp_path / "t2.jsonl"
+    logger2 = TelemetryLogger(log_path2)
+    ctrl2 = InputController(backend=backend2, logger=logger2, clock=clock2, sleep_fn=clock2.sleep, register_signals=False)
+    f_rec2 = make_synthetic_minimap_frame(health_ratio=0.36, yellow_points=[(0.50, 0.25)])
+    f_hit2 = make_synthetic_minimap_frame(health_ratio=0.20, yellow_points=[(0.50, 0.25)])
+    runner2 = ActionRunner(ctrl2, ReplayWindowBackend(lambda idx: f_rec2 if idx == 0 else f_hit2), ScriptedHudOCR(lambda idx: {}), logger2, clock2, clock2.sleep)
+    res2 = runner2.advance_under_fire(
+        recover_wait_s=2.5,
+        config=LoopConfig(max_duration_s=3.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert res2.stop_reason == "low_health"
+    assert any(r.get("action") == "advance_exposed" for r in read_telemetry(log_path2, tool="runner"))
+    assert backend2.currently_held_keys == set()
+    assert backend2.currently_held_buttons == set()

@@ -537,7 +537,9 @@ class ActionRunner:
         recover_health: float = 0.40,
         recover_wait_s: float = 2.5,
         use_special: bool = True,
-        recoil_comp_dy: int = 4,
+        recoil_comp_dy: int = 1,
+        aim_settle_s: float = 0.15,
+        exposed_recover_drop_threshold: float = 0.12,
         steer_gain: float = 160.0,
         deadband: float = 0.06,
         bearing_deadband: float = 0.10,
@@ -579,6 +581,7 @@ class ActionRunner:
         engage_cooldown_until_t = 0.0
         recover_cooldown_until_t = 0.0
         tether_active_until_t = 0.0
+        recover_start_health: Optional[float] = None
         special_triggered = False
 
         prev_gray: Optional[np.ndarray] = None
@@ -611,16 +614,24 @@ class ActionRunner:
                 sweep_offset_y = 0
             sweep_idx = 0
 
+        def _reset_motion_tracker() -> None:
+            nonlocal prev_gray, last_motion_check_t, low_motion_elapsed_s
+            prev_gray = None
+            last_motion_check_t = None
+            low_motion_elapsed_s = 0.0
+
         def _set_aim(want_aim: bool) -> None:
             is_aiming = "right" in self.input.held_buttons
             if want_aim and not is_aiming:
                 self.input.mouse_down("right")
+                if aim_settle_s > 0:
+                    self._sleep(aim_settle_s)
             elif not want_aim and is_aiming:
                 _recenter_sweep()
                 self.input.mouse_up("right")
 
         def _on_tick(state: FrameState) -> Optional[str]:
-            nonlocal phase, phase_end_t, min_move_until_t, engage_cooldown_until_t, recover_cooldown_until_t, tether_active_until_t, special_triggered, prev_gray, last_motion_check_t, low_motion_elapsed_s, last_bearing, recovery_count, sweep_idx, sweep_offset_x, sweep_offset_y, aligned_ticks
+            nonlocal phase, phase_end_t, min_move_until_t, engage_cooldown_until_t, recover_cooldown_until_t, tether_active_until_t, recover_start_health, special_triggered, prev_gray, last_motion_check_t, low_motion_elapsed_s, last_bearing, recovery_count, sweep_idx, sweep_offset_x, sweep_offset_y, aligned_ticks
             now_t = state.elapsed_s
             mm = state.minimap
 
@@ -641,6 +652,15 @@ class ActionRunner:
                     self._tap_key_preserving_held("capslock", hold_s=0.08)
                     special_triggered = True
 
+            target, route_bearing = self._resolve_route_target_and_bearing(mm, target_color)
+            if target is not None and target.distance <= arrive_distance:
+                _set_aim(False)
+                _set_movement(False)
+                return "target_reached"
+
+            blue_targets = mm.targets.get("blue", ())
+            blue_ally = blue_targets[0] if blue_targets else None
+
             # Low-health cover/recover phase
             if (
                 phase != "recover"
@@ -653,8 +673,8 @@ class ActionRunner:
                 phase = "recover"
                 phase_end_t = now_t + recover_wait_s
                 recover_cooldown_until_t = phase_end_t + 3.0
-                low_motion_elapsed_s = 0.0
-                prev_gray = None
+                recover_start_health = mm.health_ratio
+                _reset_motion_tracker()
                 self._tap_key_preserving_held("q", hold_s=0.08)
                 self._logger.log(
                     tool="runner",
@@ -665,21 +685,46 @@ class ActionRunner:
                 return None
 
             if phase == "recover":
-                if now_t < phase_end_t and (not mm.minimap_visible or mm.health_ratio < min_engage_health):
-                    return None
-                phase = "move"
-                phase_end_t = now_t + move_phase_s
-                min_move_until_t = now_t + move_phase_s
-                engage_cooldown_until_t = now_t + move_phase_s
+                if (
+                    mm.minimap_visible
+                    and recover_start_health is not None
+                    and (recover_start_health - mm.health_ratio) >= exposed_recover_drop_threshold
+                ):
+                    if blue_ally is not None and blue_ally.distance > 0.14:
+                        phase = "move"
+                        tether_active_until_t = max(tether_active_until_t, now_t + 2.5)
+                        phase_end_t = now_t + move_phase_s
+                        min_move_until_t = now_t + move_phase_s
+                        engage_cooldown_until_t = now_t + move_phase_s
+                        recover_cooldown_until_t = now_t + 1.5
+                        recover_start_health = None
+                        _reset_motion_tracker()
+                        self._logger.log(
+                            tool="runner",
+                            action="advance_retreat",
+                            status="ok",
+                            details={"health_ratio": round(mm.health_ratio, 3), "ally_distance": round(blue_ally.distance, 3)},
+                        )
+                    elif mm.health_ratio < 0.25:
+                        _set_aim(False)
+                        _set_movement(False)
+                        self._logger.log(
+                            tool="runner",
+                            action="advance_exposed",
+                            status="ok",
+                            details={"health_ratio": round(mm.health_ratio, 3)},
+                        )
+                        return "low_health"
+                if phase == "recover":
+                    if now_t < phase_end_t and (not mm.minimap_visible or mm.health_ratio < min_engage_health):
+                        return None
+                    phase = "move"
+                    phase_end_t = now_t + move_phase_s
+                    min_move_until_t = now_t + move_phase_s
+                    engage_cooldown_until_t = now_t + move_phase_s
+                    recover_start_health = None
+                    _reset_motion_tracker()
 
-            target, route_bearing = self._resolve_route_target_and_bearing(mm, target_color)
-            if target is not None and target.distance <= arrive_distance:
-                _set_aim(False)
-                _set_movement(False)
-                return "target_reached"
-
-            blue_targets = mm.targets.get("blue", ())
-            blue_ally = blue_targets[0] if blue_targets else None
             need_ally_tether = (now_t < tether_active_until_t) or (
                 blue_ally is not None and blue_ally.distance > ally_tether_distance
             )
@@ -701,8 +746,7 @@ class ActionRunner:
                 sweep_idx = 0
                 sweep_offset_x = 0
                 sweep_offset_y = 0
-                low_motion_elapsed_s = 0.0
-                prev_gray = None
+                _reset_motion_tracker()
                 _set_aim(True)
             elif phase == "engage" and (
                 enemy is None or enemy.distance > engage_distance or need_ally_tether or now_t >= phase_end_t
@@ -712,8 +756,7 @@ class ActionRunner:
                 phase_end_t = now_t + move_phase_s
                 min_move_until_t = now_t + move_phase_s
                 engage_cooldown_until_t = now_t + move_phase_s
-                low_motion_elapsed_s = 0.0
-                prev_gray = None
+                _reset_motion_tracker()
 
             if phase == "engage":
                 _set_movement(False)
@@ -728,10 +771,10 @@ class ActionRunner:
 
                 if enemy is not None:
                     if abs(enemy.bearing) > bearing_deadband:
-                        dx = int(round(max(-220.0, min(220.0, enemy.bearing * 180.0))))
+                        dx = int(round(max(-220.0, min(220.0, enemy.bearing * 200.0))))
                         if dx != 0:
                             self._steer_camera(dx, 0)
-                    if abs(enemy.bearing) <= 0.30:
+                    if abs(enemy.bearing) <= 0.22:
                         aligned_ticks += 1
                         if aligned_ticks % 3 == 0:
                             self._fire_bursts("left", bursts=2, hold_s=0.03, gap_s=0.03, reason="suppressive")
@@ -751,11 +794,12 @@ class ActionRunner:
 
             # Move phase
             _set_aim(False)
-            _set_movement(True, use_sprint=(sprint and not need_ally_tether))
+            retreating = now_t < tether_active_until_t
+            _set_movement(True, use_sprint=(retreating or (sprint and not need_ally_tether)))
             if nav_bearing is not None:
                 last_bearing = nav_bearing
 
-            if enable_stuck_recovery:
+            if enable_stuck_recovery and (not mm.minimap_visible or mm.health_ratio >= recover_health):
                 cur_gray = _road_gray_sample(state.capture.image)
                 if prev_gray is not None and last_motion_check_t is not None:
                     dt = max(0.0, now_t - last_motion_check_t)
@@ -769,9 +813,9 @@ class ActionRunner:
 
                 if low_motion_elapsed_s >= stuck_window_s and (cfg.max_duration_s - now_t) > 0.25:
                     recovery_count += 1
-                    self._perform_on_foot_sidestep(recovery_count, last_bearing, unstuck_duration_s, vault_on_stuck)
-                    low_motion_elapsed_s = 0.0
-                    prev_gray = None
+                    allow_vault = vault_on_stuck and (not mm.minimap_visible or mm.health_ratio >= 0.50)
+                    self._perform_on_foot_sidestep(recovery_count, last_bearing, unstuck_duration_s, allow_vault)
+                    _reset_motion_tracker()
                     return None
 
             if nav_bearing is not None and abs(nav_bearing) > deadband:
