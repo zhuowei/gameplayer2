@@ -234,9 +234,13 @@ class SilhouetteHumanDetectorBackend:
             px_h = max_y - min_y + 1
             bw = px_w / gw
             bh = px_h / gh
-            if bh < self.min_height or bh > self.max_height or bw > self.max_width:
+            if bw < 0.018 or bh < self.min_height or bh > self.max_height or bw > self.max_width:
                 continue
-            if (px_h / max(1, px_w)) < self.min_aspect_ratio:
+            aspect = px_h / max(1, px_w)
+            if aspect < self.min_aspect_ratio or aspect > 4.5:
+                continue
+            # Reject vertical pillars/pipes clipped by the top edge of the ROI.
+            if min_y <= 2 and bh >= 0.12:
                 continue
             fill = area / max(1, px_w * px_h)
             if fill < 0.35:
@@ -302,11 +306,8 @@ def select_visual_enemy_target(
         for t in minimap.targets.get("red", ())
         if abs(t.bearing) <= 0.45
     ]
-    blue_xs = [
-        expected_screen_x_from_bearing(t.bearing)
-        for t in minimap.targets.get("blue", ())
-        if abs(t.bearing) <= 0.45
-    ]
+    blue_targets = [t for t in minimap.targets.get("blue", ()) if abs(t.bearing) <= 0.45]
+    blue_xs = [expected_screen_x_from_bearing(t.bearing) for t in blue_targets]
     pref_x = (
         expected_screen_x_from_bearing(preferred_enemy.bearing)
         if preferred_enemy is not None and abs(preferred_enemy.bearing) <= 0.45
@@ -315,6 +316,7 @@ def select_visual_enemy_target(
 
     best: Optional[ScreenTarget] = None
     best_score = -1e9
+    max_aim_y = 0.62 if (preferred_enemy is not None and preferred_enemy.distance <= 0.14) else 0.57
     for cand in candidates:
         if _is_player_foreground_box(cand):
             continue
@@ -325,14 +327,25 @@ def select_visual_enemy_target(
             if cx < 0.20 and (preferred_enemy is None or preferred_enemy.bearing >= -0.35):
                 continue
         ax, ay = cand.aim_point
-        if ax < 0.06 or ax > 0.94 or ay < 0.18 or ay > 0.80:
+        if ax < 0.06 or ax > 0.94 or ay < 0.24 or ay > max_aim_y:
             continue
 
-        # Reject detections tightly aligned with a blue ally when no red enemy is nearby.
+        # Reject detections aligned with a blue ally (when no red is nearby, OR when a closer ally blocks the line).
         if blue_xs:
             min_blue = min(abs(ax - bx) for bx in blue_xs)
             min_red = min((abs(ax - rx) for rx in red_xs), default=1.0)
             if min_blue < 0.09 and min_red > 0.16:
+                continue
+            cand_h = cand.bbox[3]
+            cand_bottom = cand.bbox[1] + cand_h
+            closer_ally_occluding = any(
+                abs(ax - expected_screen_x_from_bearing(bt.bearing)) <= 0.11
+                and bt.distance <= 0.24
+                and (preferred_enemy is None or bt.distance + 0.04 < preferred_enemy.distance)
+                and (cand_h >= 0.14 or cand_bottom >= 0.62 or ay >= 0.52)
+                for bt in blue_targets
+            )
+            if closer_ally_occluding:
                 continue
 
         score = cand.confidence

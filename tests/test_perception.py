@@ -135,3 +135,24 @@ def test_select_visual_enemy_rejects_trevor_pillar_and_out_of_cone_candidates() 
     assert selected is not None
     assert abs(selected.target.aim_point[0] - 0.635) < 1e-6
     assert selected.target.source == "silhouette"
+
+
+def test_select_visual_enemy_rejects_closer_occluding_blue_ally_and_floor_boxes() -> None:
+    # Cop far ahead at (0.50, 0.30) (~0.61 dist), closer blue ally Brad at (0.50, 0.69) (~0.10 dist, same bearing!)
+    mm_frame = make_synthetic_minimap_frame(
+        health_ratio=0.95,
+        red_points=[(0.50, 0.30)],
+        blue_points=[(0.50, 0.69)],
+    )
+    mm = inspect_minimap(mm_frame)
+    cands = [
+        # Brad foreground occluding along same bearing (h=0.169, aim_y=0.544)
+        ScreenTarget(bbox=(0.452, 0.485, 0.061, 0.169), aim_point=(0.483, 0.544), confidence=0.88, source="vision_human"),
+        # Floor / crouch artifact below combat horizon (aim_y=0.614 > 0.57)
+        ScreenTarget(bbox=(0.50, 0.57, 0.04, 0.12), aim_point=(0.52, 0.614), confidence=0.85, source="vision_human"),
+        # Real distant cop visible above/beside Brad
+        ScreenTarget(bbox=(0.54, 0.41, 0.03, 0.09), aim_point=(0.555, 0.442), confidence=0.62, source="vision_human"),
+    ]
+    selected = select_visual_enemy_target(cands, mm, preferred_enemy=mm.nearest_enemy)
+    assert selected is not None
+    assert abs(selected.target.aim_point[0] - 0.555) < 1e-6

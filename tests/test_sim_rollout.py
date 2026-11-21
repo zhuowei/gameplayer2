@@ -699,3 +699,82 @@ def test_aligned_visual_target_fires_immediately_on_non_4_10_tick_and_restricts_
     )
     mm = inspect_minimap(pillar_scene)
     assert runner_sil._detect_visual_target(pillar_scene, mm, mm.nearest_enemy) is None
+
+
+def test_vision_backend_disables_silhouette_fallback_yields_on_miss_and_low_health_taps_cover(tmp_path) -> None:
+    """Re #348/#351: Vision backend never falls back to silhouette pillar noise, yields on 5 aligned misses, & snaps q on low_health."""
+    from gameplayer.perception import ScreenTarget, VisionHumanDetectorBackend
+
+    # 1) VisionHumanDetectorBackend returning [] on cluttered pillar frame must NOT fall back to SilhouetteHumanDetectorBackend.
+    clutter = make_synthetic_minimap_frame(health_ratio=0.95, red_points=[(0.50, 0.44)])
+    d = ImageDraw.Draw(clutter)
+    d.rectangle((220, 72, 420, 270), fill=(195, 200, 205))
+    # High-contrast center concrete pillar inside cx±0.14 cone that Silhouette would detect if fallback ran!
+    d.rectangle((306, 125, 332, 225), fill=(18, 18, 22))
+    empty_vision = VisionHumanDetectorBackend()
+    v_clock = FakeClock()
+    runner_v = ActionRunner(
+        InputController(RecordingInputBackend(), TelemetryLogger(tmp_path / "v.jsonl"), clock=v_clock, sleep_fn=v_clock.sleep, register_signals=False),
+        ReplayWindowBackend(lambda _i: clutter),
+        ScriptedHudOCR(lambda _i: {}),
+        TelemetryLogger(tmp_path / "v.jsonl"),
+        human_detector=empty_vision,
+    )
+    mm_clutter = inspect_minimap(clutter)
+    assert runner_v._detect_visual_target(clutter, mm_clutter, mm_clutter.nearest_enemy) is None
+
+    # 2) Visual target aligned >= 5 ticks without red_reticle suppresses visual & yields to scan_pattern sweep.
+    class _AlwaysAlignedVision(VisionHumanDetectorBackend):
+        def detect_humans(self, image: Image.Image, roi=None) -> list[ScreenTarget]:
+            del image, roi
+            return [ScreenTarget(bbox=(0.485, 0.44, 0.03, 0.10), aim_point=(0.50, 0.48), confidence=0.80, source="vision_human")]
+
+    always_aligned = _AlwaysAlignedVision()
+    frame_white = make_synthetic_minimap_frame(health_ratio=0.95, red_points=[(0.50, 0.44)])
+    ImageDraw.Draw(frame_white).rectangle((318, 178, 322, 182), fill=(240, 240, 240))
+    clock2 = FakeClock()
+    backend2 = RecordingInputBackend()
+    log2 = tmp_path / "yield.jsonl"
+    ctrl2 = InputController(backend2, TelemetryLogger(log2), clock=clock2, sleep_fn=clock2.sleep, register_signals=False)
+    runner_yield = ActionRunner(
+        ctrl2,
+        ReplayWindowBackend(lambda _i: frame_white),
+        ScriptedHudOCR(lambda _i: {}),
+        TelemetryLogger(log2),
+        clock=clock2,
+        sleep_fn=clock2.sleep,
+        human_detector=always_aligned,
+    )
+    runner_yield.advance_under_fire(
+        aim_settle_s=0.0,
+        move_phase_s=0.05,
+        engage_phase_s=1.2,
+        scan_pattern=((18, 0), (-36, 0)),
+        config=LoopConfig(max_duration_s=1.1, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    deltas2 = [ev[1][:2] for ev in backend2.events if ev[0] == "mouse_delta"]
+    assert (9, 0) in deltas2 and (-18, 0) in deltas2, f"Expected fallback to scan_pattern sweep (18->9,9 / -36->-18,-18), got {deltas2}"
+
+    # 3) cover_on_low_health=True snaps 'q' cover when aborting "low_health" outside recover.
+    low_hp_frame = make_synthetic_minimap_frame(health_ratio=0.20, red_points=[(0.50, 0.44)])
+    clock3 = FakeClock()
+    backend3 = RecordingInputBackend()
+    log3 = tmp_path / "lowhp.jsonl"
+    ctrl3 = InputController(backend3, TelemetryLogger(log3), clock=clock3, sleep_fn=clock3.sleep, register_signals=False)
+    runner_low = ActionRunner(
+        ctrl3,
+        ReplayWindowBackend(lambda _i: low_hp_frame),
+        ScriptedHudOCR(lambda _i: {}),
+        TelemetryLogger(log3),
+        clock=clock3,
+        sleep_fn=clock3.sleep,
+    )
+    res_low = runner_low.advance_under_fire(
+        cover_on_low_health=True,
+        config=LoopConfig(max_duration_s=2.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert res_low.stop_reason == "low_health"
+    assert ("key_down", "q") in backend3.events
+    logs3 = read_telemetry(log3, tool="runner")
+    assert any(r.get("action") == "advance_exposed" and r["details"].get("tap_cover") is True for r in logs3)
+    assert backend3.currently_held_keys == set()

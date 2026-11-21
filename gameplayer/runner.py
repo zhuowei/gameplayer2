@@ -361,12 +361,7 @@ class ActionRunner:
             roi = (0.15, 0.20, 0.88, 0.76)
 
         candidates = detector.detect_humans(image, roi=roi)
-        selected = select_visual_enemy_target(candidates, minimap, preferred_enemy=preferred_enemy)
-        if selected is None and isinstance(detector, VisionHumanDetectorBackend):
-            if preferred_enemy is not None and abs(preferred_enemy.bearing) <= 0.25:
-                sil_cands = _valid_silhouette(self._silhouette_fallback.detect_humans(image, roi=sil_roi))
-                selected = select_visual_enemy_target(sil_cands, minimap, preferred_enemy=preferred_enemy)
-        return selected
+        return select_visual_enemy_target(candidates, minimap, preferred_enemy=preferred_enemy)
 
     def _handle_visual_aligned_tick(
         self,
@@ -1532,6 +1527,7 @@ class ActionRunner:
         unstuck_duration_s: float = 0.55,
         vault_on_stuck: bool = True,
         cover_on_timeout: bool = True,
+        cover_on_low_health: bool = True,
         scan_pattern: Sequence[tuple[int, int]] = DEFAULT_RETICLE_SWEEP,
         config: Optional[LoopConfig] = None,
     ) -> LoopResult:
@@ -1583,6 +1579,7 @@ class ActionRunner:
         no_lock_ticks = 0
         engage_red_hits = 0
         blocked_flank_streak = 0
+        visual_suppressed_until_t = 0.0
         cam_fb = _CameraFeedback(enabled=self._enable_camera_motion_tracking)
 
         def _set_key(key: str, want_down: bool) -> None:
@@ -1625,7 +1622,7 @@ class ActionRunner:
                 cam_fb.reset()
 
         def _on_tick(state: FrameState) -> Optional[str]:
-            nonlocal phase, phase_end_t, min_move_until_t, engage_cooldown_until_t, engage_start_t, flank_unblock_until_t, recover_cooldown_until_t, tether_active_until_t, recover_start_health, retreat_start_health, special_triggered, prev_gray, last_motion_check_t, low_motion_elapsed_s, last_bearing, recovery_count, sweep_idx, sweep_offset_x, sweep_offset_y, aligned_ticks, target_idx, no_lock_ticks, engage_red_hits, blocked_flank_streak
+            nonlocal phase, phase_end_t, min_move_until_t, engage_cooldown_until_t, engage_start_t, flank_unblock_until_t, recover_cooldown_until_t, tether_active_until_t, recover_start_health, retreat_start_health, special_triggered, prev_gray, last_motion_check_t, low_motion_elapsed_s, last_bearing, recovery_count, sweep_idx, sweep_offset_x, sweep_offset_y, aligned_ticks, target_idx, no_lock_ticks, engage_red_hits, blocked_flank_streak, visual_suppressed_until_t
             now_t = state.elapsed_s
             tick_clock_0 = self._clock()
 
@@ -1711,7 +1708,7 @@ class ActionRunner:
                     tool="runner",
                     action="advance_exposed",
                     status="ok",
-                    details={"health_ratio": round(mm.health_ratio, 3)},
+                    details={"health_ratio": round(mm.health_ratio, 3), "tap_cover": bool(tap_cover)},
                 )
                 return "low_health"
 
@@ -1729,7 +1726,7 @@ class ActionRunner:
                 and (retreat_start_health - mm.health_ratio) >= exposed_recover_drop_threshold
             )
             if mid_retreat and mm.minimap_visible and mm.health_ratio < 0.25 and (point_blank_enemy or retreat_drop):
-                return _abort_low_health(tap_cover=True)
+                return _abort_low_health(tap_cover=cover_on_low_health)
             if (
                 phase != "recover"
                 and (not mid_retreat)
@@ -1755,7 +1752,7 @@ class ActionRunner:
                             },
                         )
                     else:
-                        return _abort_low_health(tap_cover=True)
+                        return _abort_low_health(tap_cover=cover_on_low_health)
                 elif point_blank_enemy and enemy.distance <= engage_distance:
                     _enter_engage_phase(cooldown_s=1.5)
                 elif (
@@ -1964,6 +1961,7 @@ class ActionRunner:
                     no_lock_ticks = 0
                     engage_red_hits += 1
                     blocked_flank_streak = 0
+                    visual_suppressed_until_t = 0.0
                     self._fire_bursts("left", bursts=3, hold_s=0.03, gap_s=0.025, reason="red_reticle")
                     cam_fb.fired_last_tick = True
                     if recoil_comp_dy > 0:
@@ -1971,7 +1969,7 @@ class ActionRunner:
                         cam_fb.last_cmd_dy = int(recoil_comp_dy) * 2
                     return None
 
-                if reticle.is_visible and (enemy is None or abs(enemy.bearing) <= 0.45):
+                if reticle.is_visible and now_t >= visual_suppressed_until_t and (enemy is None or abs(enemy.bearing) <= 0.45):
                     visual = self._detect_visual_target(state.capture.image, mm, enemy)
                 else:
                     visual = None
@@ -2005,6 +2003,14 @@ class ActionRunner:
                         return None
                     if abs(visual.error_x) <= 0.045 and abs(visual.error_y) <= 0.045:
                         aligned_ticks += 1
+                        if aligned_ticks >= 5:
+                            # Visual box stayed aligned across 2 suppressive bursts with 0 red_reticle (ally/occluder): yield to sweep.
+                            visual_suppressed_until_t = now_t + 1.8
+                            aligned_ticks = 0
+                            no_lock_ticks = 0
+                            target_idx += 1
+                            _recenter_sweep()
+                            return None
                         self._handle_visual_aligned_tick(
                             fire_button="left",
                             aligned_ticks=aligned_ticks,
@@ -2620,6 +2626,7 @@ class ActionRunner:
         no_reticle_ticks = 0
         edge_shift_attempts = 0
         suppressive_no_red_count = 0
+        visual_suppressed_until_t = 0.0
         cam_fb = _CameraFeedback(enabled=self._enable_camera_motion_tracking)
 
         def _recenter_sweep() -> None:
@@ -2690,7 +2697,7 @@ class ActionRunner:
             return None
 
         def _on_tick(state: FrameState) -> Optional[str]:
-            nonlocal special_triggered, duck_until_t, duck_logged, duck_reason_heal, duck_start_health, peak_health, sweep_idx, sweep_offset_x, sweep_offset_y, shots_fired, no_enemy_ticks, no_enemy_since_t, aligned_ticks, target_idx, no_lock_ticks, steer_cadence_ticks, large_steer_ticks, clamped_ticks, unclamp_attempts, flank_stage2_done, toggled_cover_for_flank, pre_flank_bearing, last_clamped_bearing, no_reticle_ticks, edge_shift_attempts, suppressive_no_red_count
+            nonlocal special_triggered, duck_until_t, duck_logged, duck_reason_heal, duck_start_health, peak_health, sweep_idx, sweep_offset_x, sweep_offset_y, shots_fired, no_enemy_ticks, no_enemy_since_t, aligned_ticks, target_idx, no_lock_ticks, steer_cadence_ticks, large_steer_ticks, clamped_ticks, unclamp_attempts, flank_stage2_done, toggled_cover_for_flank, pre_flank_bearing, last_clamped_bearing, no_reticle_ticks, edge_shift_attempts, suppressive_no_red_count, visual_suppressed_until_t
             mm = state.minimap
             now_t = state.elapsed_s
 
@@ -2772,6 +2779,7 @@ class ActionRunner:
                 suppressive_no_red_count = 0
                 aligned_ticks = 0
                 no_lock_ticks = 0
+                visual_suppressed_until_t = 0.0
                 steer_cadence_ticks = 0
                 large_steer_ticks = 0
                 clamped_ticks = 0
@@ -2906,7 +2914,7 @@ class ActionRunner:
                     last_clamped_bearing = None
                     toggled_cover_for_flank = False
 
-                if reticle.is_visible and abs(enemy.bearing) <= 0.45:
+                if reticle.is_visible and now_t >= visual_suppressed_until_t and abs(enemy.bearing) <= 0.45:
                     visual = self._detect_visual_target(state.capture.image, mm, enemy)
                 else:
                     visual = None
@@ -2940,6 +2948,13 @@ class ActionRunner:
                         return None
                     if abs(visual.error_x) <= 0.045 and abs(visual.error_y) <= 0.045:
                         aligned_ticks += 1
+                        if aligned_ticks >= 5:
+                            visual_suppressed_until_t = now_t + 1.8
+                            aligned_ticks = 0
+                            no_lock_ticks = 0
+                            target_idx += 1
+                            _recenter_sweep()
+                            return None
                         if self._handle_visual_aligned_tick(
                             fire_button=fire_button,
                             aligned_ticks=aligned_ticks,

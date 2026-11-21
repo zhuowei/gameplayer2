@@ -145,3 +145,15 @@ Escalating deep perception and control failures to `Carbon` specialists produced
     1. Trevor snapped into cover against a narrow center pillar (Michael's `EXIT` pillar) occupying `x=[0.34..0.58]`, which fell between `classify_posture`'s left (`0.18..0.36`) and right (`0.48..0.66`) bands and returned `"standing"`/`"unknown"`.
     2. Snapping to a side prop while `yellow` remained `> 0.08` away triggered cover slides on the wrong prop instead of exiting cover (`q`) and advancing to `yellow`.
   - **Cycle 10 Fixes**: Added center pillar band `(0.34..0.58)` (full + chest-high `88..162`) and lower-half `"unknown"` fallback (`c_ratio >= 0.96` or `cc_ratio >= 1.05`) in `classify_posture()`, and updated `approach_and_enter_cover()` to detect `wrong_prop_cover` (cover latched while `target.distance > max(arrive_distance, 0.08)`), call `exit_cover(force=True)`, and run `follow_route_on_foot` directly onto `yellow`.
+
+---
+
+## 10. Checkpoint 6 (2026-11-21 02:02 PST)
+
+- **Progression & Telemetry (`4aeca4e`, `8101e43`, Cycle 11–12)**:
+  - **Cycle 11 (`8101e43`, `#344`, `123 passed`)**: Replacing `no_lock_ticks in (4, 10)` with immediate visual-alignment suppressive fire (`aligned_ticks == 1 or aligned_ticks % 4 == 0`) + zero-sum micro-dither pushed live `cover_peek_combat` `red_reticle` accuracy to **`22/39` (`56.4%`)** in `09:50–09:53Z` (`#351`).
+  - **Root Causes in Yard Shootout Deaths (`#348`, `#349`, `#350`, `clips/check_0954.mp4`)**:
+    1. `_silhouette_fallback` inside `_detect_visual_target` triggered `35/54` (`65%`, up to `53/54` with scan steers) false locks on yellow-striped concrete pillars, vertical drainpipes, doorway edges, and floor shadows, hijacking `advance_under_fire` away from `VisionHumanDetectorBackend` + minimap bearing + `DEFAULT_RETICLE_SWEEP` (`0/18` = `0%` `red_reticle`).
+    2. `VisionHumanDetectorBackend` also locked onto closer occluding ally **Brad** (`[0.483, 0.544]`) when `red` cops lay behind him on the same bearing (`min_red <= 0.16` bypassed ally filtering), and lower-horizon floor artifacts (`ay > 0.57`).
+    3. `advance_under_fire` aborted `"low_health"` (`0.247` HP at `09:57:47Z`) exposed without snapping `q` cover during the turn gap (`cover_on_low_health`).
+  - **Cycle 12 Fixes**: Removed `_silhouette_fallback` inside `_detect_visual_target` when using `VisionHumanDetectorBackend` (keeping `SilhouetteHumanDetectorBackend` for explicit injection/offline tests with strict thin-edge/top-pillar filtering), added closer-ally occlusion + `ay <= 0.57` horizon filters in `select_visual_enemy_target()`, yielded persistent visual misses (`aligned_ticks >= 5` with `0` `red_reticle`) back to `DEFAULT_RETICLE_SWEEP` (`visual_suppressed_until_t`), and added `cover_on_low_health=True` to `advance_under_fire`.
