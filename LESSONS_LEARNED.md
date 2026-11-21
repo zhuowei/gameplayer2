@@ -298,3 +298,45 @@ Escalating deep perception and control failures to `Carbon` specialists produced
 6. **Proactive Worker Rotation & Fast/Slow Test Split**:
    - Rotate `player` and `toolsmith` automatically around `~400–500` steps (at natural mission checkpoints) to avoid compaction stalls.
    - Tag heavy simulator rollouts (`@pytest.mark.slow`) so routine hotfix verification runs fast unit tests in `<10s` while full simulator rollouts run in parallel or on major cycles.
+
+---
+
+## 18. Deeper Architectural & Operational Blind Spots (What Else We Could Have Done Better)
+
+Beyond the immediate Session 2 fixes in Section 17, stepping back across ~20 hours of live runs exposes eight broader structural improvements that would have accelerated progress dramatically:
+
+### 1. Persistent Stateful Runtime Daemon (Eliminate Cold-Start Subprocess Amnesia)
+- **What happened**: Every `player` turn spawned a fresh `.venv/bin/python -c "..."` process, re-importing `Quartz`/`Vision`/`cv2`/`numpy`, re-warming `VNDetectHumanRectanglesRequest`, and discarding in-memory state (`_in_cover_hint`, `_last_flank_streak`, `CameraMotionTracker`, calibration gains) across turns. Multiple live deaths (`#366`, repeated flank resets) stemmed directly from inter-turn state amnesia and `1–3s` startup gaps.
+- **Better**: Run one persistent `gameplayer.daemon` process (over a local Unix socket / CLI client) holding warm ML models, live state (`in_cover`, `in_vehicle`, `keyboard_alive`, calibrated gains), and a single shared capture ring buffer.
+
+### 2. Single-Producer Capture Bus (No Competing Screen Captures)
+- **What happened**: `player` (`~10 Hz`) and `watcher`'s `capture_daemon` (`2 Hz`) called `CGWindowListCreateImage` independently while Wine ran GTA V, adding WindowServer/GPU contention (offline `pytest` dropped from `93–206s` during live runs to `11.38s` once Wine/capture stopped) and decoupling video timestamps from loop telemetry.
+- **Better**: Publish frames from one capture producer into a shared memory ring buffer consumed by both closed-loop controllers and the MP4 segment recorder/slicer, guaranteeing exact frame-to-telemetry alignment at half the capture overhead.
+
+### 3. Typed Action CLI Instead of Ad-Hoc Inline `python -c` Scripts
+- **What happened**: Even after adding [gameplayer/playbooks.py](gameplayer/playbooks.py), `player` workers still wrote ad-hoc inline Python scripts every turn, introducing avoidable one-off errors (blind `w 0.8s + f` overshooting the getaway SUV in `#363`, wrong `enter_cover=True` flag in `#366`, bare `sleep` calls without inspection).
+- **Better**: Constrain `player` to a narrow, typed CLI (`gameplayer act cover-peek`, `gameplayer act enter-vehicle`, `gameplayer act drive-gps`, `gameplayer status`) so every parameter is validated, every action is uniformly logged, and reusable behaviors are forced into tested modules.
+
+### 4. Automated Real-Frame Visual Regression Bank in CI
+- **What happened**: We recorded `375` 3-minute MP4 segments and hundreds of ad-hoc PNGs (`captures/`, `clips/`), yet `replay_bench.py` was only invoked manually on a few clips.
+- **Better**: Auto-archive every anomaly (`MISSION_FAILED`, `cover_blocked`, `focus_lost`, `0%` `red_reticle`) as a compact versioned fixture (`frame.png` + `expected.json`) and run real-image assertions inside `pytest` for minimap segmentation, posture classification, HUD OCR, and Vision target locking. That catches alarm-wash false blips, ally occlusion, and pillar misclassifications before merge.
+
+### 5. Pre-Flight Environment & I/O Smoke Test (`gameplayer preflight`)
+- **What happened**: Hours were lost across Sessions 1 & 2 to host/game configuration surprises (`Raw Input` ignoring `CGEvent` deltas, macOS `Fn+Q` launching `Notes`, unverified vertical pitch sign, Wine keyboard wedges).
+- **Better**: Run an automated 10-second `preflight` gate before every session: verify screen/accessibility permissions, check for conflicting macOS hotkeys/overlays, confirm subtitles + Simple reticle, calibrate `(dx, dy)` signs/gains, and execute a live `Esc -> Pause Menu -> Esc` round-trip keyboard liveness check.
+
+### 6. Progress-Velocity Watchdogs & Deterministic (Zero-Token) Monitoring
+- **What happened**: Mandatory upgrade triggers leaned heavily on `consecutive_failures >= 2`, missing low-death grinds (`player-5` survived `~20m` at `0.506` HP behind a roadblock cruiser with `0` deaths) and `>75m` wedged-keyboard stalls. Meanwhile, LLM-based `watcher`/`monitor` workers consumed tokens polling idle states, and `1,400–1,750`-step workers slowed to `2–4 min/turn` and compacted mid-task.
+- **Better**: Run stall/liveness checks (`objective_changed`, `minimap_distance_delta`, `enemy_count_delta`, `keyboard_liveness`) in deterministic Python code that only wakes an LLM when a metric trips; enforce strict hard timeouts (`<2 min` escalation on dead input) and rotate `player`/`toolsmith` every `~400` steps with a compact structured handoff.
+
+### 7. Richer Pixel Cues Beyond Human Bounding Boxes
+- **What happened**: Shooting and driving relied almost solely on minimap blips + full-body human boxes + a bottom-center `_road_motion_score` patch.
+- **Better**:
+  - **Damage-vignette direction detector** (screen-edge red flashes) to know *which side* is flanking Trevor during `cover_duck`.
+  - **Forward road-corridor / obstacle-depth cue** (e.g., lightweight CoreML monocular depth or drivable-road mask) so `follow_gps_drive` steers *around* parked civilian cars and bridge guardrails instead of ramming them.
+  - **Letterbox / HUD-presence classifier** to distinguish unskippable cutscenes cleanly from frozen gameplay.
+
+### 8. Higher-Leverage Research & Hardware Choices for Future Runs
+- **Privileged Dev/Eval Oracle (Black-Box Runtime)**: Log read-only ground truth (`x, y, z, yaw, pitch, in_cover, in_vehicle, enemy LoS`) during *development and calibration* while keeping the live agent pure pixels + HID—accelerating vision dataset creation, system-ID fitting, and root-cause attribution by `10–50×`.
+- **Save-State + Frame-Step Testbed First**: Iterate the core perception/driving/combat stack on an emulated 3D/open-world classic first (e.g., PS2 *GTA: San Andreas* via PCSX2 or Dolphin/RetroArch) with instant millisecond save states, `4×–10×` fast-forward regression suites, and zero Wine HID quirks—then port the hardened stack back to GTA V.
+- **Hardware USB HID Loopback + Gamepad Emulation**: Inject inputs via a wired `$4` Raspberry Pi Pico (TinyUSB composite Xbox/HID Gamepad + Mouse + Keyboard with a `250 ms` firmware release watchdog) instead of macOS `CGEvent`. This bypasses `CGEvent` flag leaks and `winemac.drv` keyboard wedges, enables true `[-1, +1]` analog driving steering/throttle, and unlocks legitimate native GTA V controller aim assist.
