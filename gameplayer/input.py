@@ -254,6 +254,21 @@ class CGEventInputBackend:
             "ralt": Quartz.kCGEventFlagMaskAlternate,
             "lcmd": Quartz.kCGEventFlagMaskCommand,
         }
+        arrow_flags = Quartz.kCGEventFlagMaskNumericPad | Quartz.kCGEventFlagMaskSecondaryFn
+        fn_flags = Quartz.kCGEventFlagMaskSecondaryFn
+        self._key_intrinsic_flags: dict[str, int] = {
+            "left": arrow_flags,
+            "right": arrow_flags,
+            "down": arrow_flags,
+            "up": arrow_flags,
+            "home": fn_flags,
+            "end": fn_flags,
+            "page_up": fn_flags,
+            "page_down": fn_flags,
+            "delete": fn_flags,
+            **{f"f{i}": fn_flags for i in range(1, 13)},
+            "f17": fn_flags,
+        }
 
     def set_anchor_bounds(self, x: float, y: float, width: float, height: float) -> None:
         """Anchor cursor recentering inside the game window bounds `(x, y, width, height)`."""
@@ -291,9 +306,9 @@ class CGEventInputBackend:
             flags |= self._mod_flags.get(mod, 0)
         return flags
 
-    def _post(self, event: Any) -> None:
+    def _post(self, event: Any, extra_flags: int = 0) -> None:
         q = self._quartz
-        q.CGEventSetFlags(event, self._modifier_flags())
+        q.CGEventSetFlags(event, self._modifier_flags() | extra_flags)
         if self._target_pid is not None:
             q.CGEventPostToPid(int(self._target_pid), event)
         else:
@@ -329,14 +344,14 @@ class CGEventInputBackend:
             self._active_modifiers.add(norm)
         q = self._quartz
         ev = q.CGEventCreateKeyboardEvent(self._source, KEYCODES[norm], True)
-        self._post(ev)
+        self._post(ev, extra_flags=self._key_intrinsic_flags.get(norm, 0))
 
     def key_up(self, key: str) -> None:
         norm = normalize_key_name(key)
         self._active_modifiers.discard(norm)
         q = self._quartz
         ev = q.CGEventCreateKeyboardEvent(self._source, KEYCODES[norm], False)
-        self._post(ev)
+        self._post(ev, extra_flags=self._key_intrinsic_flags.get(norm, 0))
 
     def _mouse_event_type_and_btn(self, button: str, down: bool) -> tuple[int, int]:
         q = self._quartz

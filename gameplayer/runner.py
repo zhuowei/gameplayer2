@@ -12,6 +12,17 @@ from PIL import Image
 from gameplayer.hud import HudObservation, OCRBackend, inspect_frame
 from gameplayer.input import InputController
 from gameplayer.minimap import MinimapObservation, RadarTarget, inspect_minimap
+from gameplayer.perception import (
+    CameraMotion,
+    CameraMotionTracker,
+    HumanDetectorBackend,
+    ScreenTarget,
+    SilhouetteHumanDetectorBackend,
+    VisionHumanDetectorBackend,
+    VisualSteerTarget,
+    expected_screen_x_from_bearing,
+    select_visual_enemy_target,
+)
 from gameplayer.telemetry import TelemetryLogger, get_default_logger
 from gameplayer.window import CaptureResult, WindowBackend, WindowInfo, capture_game_window, find_game_window
 
@@ -169,6 +180,88 @@ class LoopResult:
         }
 
 
+class _CameraFeedback:
+    """Tracks optical-flow camera response to detect cover yaw clamping, Wine drops, and recoil pitch drift."""
+
+    def __init__(self, enabled: bool = True) -> None:
+        self.enabled = enabled
+        self.tracker = CameraMotionTracker() if enabled else None
+        self.last_cmd_dx: int = 0
+        self.last_cmd_dy: int = 0
+        self.fired_last_tick: bool = False
+        self.yaw_stall_ticks: int = 0
+        self.recoil_drift_y: float = 0.0
+        self.visual_steer_count: int = 0
+
+    def reset(self) -> None:
+        if self.tracker is not None:
+            self.tracker.reset()
+        self.last_cmd_dx = 0
+        self.last_cmd_dy = 0
+        self.fired_last_tick = False
+        self.yaw_stall_ticks = 0
+        self.recoil_drift_y = 0.0
+
+    def observe(
+        self,
+        image: Image.Image,
+        mode: str,
+        logger: TelemetryLogger,
+        input_ctrl: InputController,
+        aim_button: str = "right",
+        allow_recoil_comp: bool = True,
+    ) -> tuple[Optional[CameraMotion], bool]:
+        if not self.enabled or self.tracker is None:
+            self.last_cmd_dx = 0
+            self.last_cmd_dy = 0
+            self.fired_last_tick = False
+            return None, False
+
+        motion = self.tracker.update(image)
+        if motion.confidence >= 0.25 and abs(self.last_cmd_dx) >= 18:
+            if abs(motion.delta_yaw_px) < 3.0:
+                self.yaw_stall_ticks += 1
+                if self.yaw_stall_ticks == 4:
+                    logger.log(
+                        tool="runner",
+                        action="camera_yaw_stalled",
+                        status="ok",
+                        details={
+                            "mode": mode,
+                            "commanded_dx": self.last_cmd_dx,
+                            "measured_yaw_px": round(motion.delta_yaw_px, 2),
+                            "confidence": round(motion.confidence, 3),
+                        },
+                    )
+            else:
+                self.yaw_stall_ticks = 0
+        elif abs(self.last_cmd_dx) >= 18:
+            self.yaw_stall_ticks = 0
+
+        if allow_recoil_comp and self.fired_last_tick and motion.confidence >= 0.25 and self.last_cmd_dy == 0:
+            self.recoil_drift_y = min(0.0, self.recoil_drift_y + motion.delta_pitch_px)
+            if self.recoil_drift_y <= -6.0 and aim_button in input_ctrl.held_buttons:
+                comp = min(10, int(round(-self.recoil_drift_y * 0.5)))
+                if comp > 0:
+                    input_ctrl.mouse_delta(0, comp, steps=1, duration_s=0.01)
+                    self.recoil_drift_y = min(0.0, self.recoil_drift_y + comp)
+                    logger.log(
+                        tool="runner",
+                        action="camera_recoil_comp",
+                        status="ok",
+                        details={
+                            "mode": mode,
+                            "comp_dy": comp,
+                            "residual_pitch_px": round(self.recoil_drift_y, 2),
+                        },
+                    )
+
+        self.last_cmd_dx = 0
+        self.last_cmd_dy = 0
+        self.fired_last_tick = False
+        return motion, self.yaw_stall_ticks >= 4
+
+
 class ActionRunner:
     """Executes closed-loop gameplay skills using capture + minimap + HUD OCR + fail-safe inputs."""
 
@@ -180,6 +273,9 @@ class ActionRunner:
         logger: Optional[TelemetryLogger] = None,
         clock: Callable[[], float] = time.monotonic,
         sleep_fn: Callable[[float], None] = time.sleep,
+        human_detector: Optional[HumanDetectorBackend] = None,
+        enable_visual_targeting: bool = True,
+        enable_camera_motion_tracking: bool = True,
     ) -> None:
         self.input = input_controller
         self._window_backend = window_backend
@@ -187,6 +283,50 @@ class ActionRunner:
         self._logger = logger or get_default_logger()
         self._clock = clock
         self._sleep = sleep_fn
+        self._human_detector = human_detector
+        self._enable_visual_targeting = enable_visual_targeting
+        self._enable_camera_motion_tracking = enable_camera_motion_tracking
+        self._silhouette_fallback = SilhouetteHumanDetectorBackend()
+
+    def _get_human_detector(self) -> Optional[HumanDetectorBackend]:
+        if not self._enable_visual_targeting:
+            return None
+        if self._human_detector is not None:
+            return self._human_detector
+        if self._window_backend is None:
+            try:
+                self._human_detector = VisionHumanDetectorBackend()
+            except Exception:
+                self._human_detector = self._silhouette_fallback
+        else:
+            self._human_detector = self._silhouette_fallback
+        return self._human_detector
+
+    def _detect_visual_target(
+        self,
+        image: Image.Image,
+        minimap: MinimapObservation,
+        preferred_enemy: Optional[RadarTarget],
+    ) -> Optional[VisualSteerTarget]:
+        detector = self._get_human_detector()
+        if detector is None:
+            return None
+        if preferred_enemy is not None and abs(preferred_enemy.bearing) <= 0.35:
+            cx = expected_screen_x_from_bearing(preferred_enemy.bearing)
+            roi: tuple[float, float, float, float] = (
+                max(0.05, cx - 0.28),
+                0.20,
+                min(0.95, cx + 0.28),
+                0.76,
+            )
+        else:
+            roi = (0.15, 0.20, 0.88, 0.76)
+
+        candidates = detector.detect_humans(image, roi=roi)
+        if not candidates and isinstance(detector, VisionHumanDetectorBackend):
+            if preferred_enemy is not None and abs(preferred_enemy.bearing) <= 0.25:
+                candidates = self._silhouette_fallback.detect_humans(image, roi=roi)
+        return select_visual_enemy_target(candidates, minimap, preferred_enemy=preferred_enemy)
 
     def _snap_cover_on_health_drop(self, mode_name: str) -> None:
         self._tap_key_preserving_held("q", hold_s=0.08)
@@ -704,6 +844,7 @@ class ActionRunner:
         no_lock_ticks = 0
         engage_red_hits = 0
         blocked_flank_streak = 0
+        cam_fb = _CameraFeedback(enabled=self._enable_camera_motion_tracking)
 
         def _set_key(key: str, want_down: bool) -> None:
             is_down = key in self.input.held_keys
@@ -738,13 +879,20 @@ class ActionRunner:
                 self.input.mouse_down("right")
                 if aim_settle_s > 0:
                     self._sleep(aim_settle_s)
+                cam_fb.reset()
             elif not want_aim and is_aiming:
                 _recenter_sweep()
                 self.input.mouse_up("right")
+                cam_fb.reset()
 
         def _on_tick(state: FrameState) -> Optional[str]:
             nonlocal phase, phase_end_t, min_move_until_t, engage_cooldown_until_t, engage_start_t, flank_unblock_until_t, recover_cooldown_until_t, tether_active_until_t, recover_start_health, retreat_start_health, special_triggered, prev_gray, last_motion_check_t, low_motion_elapsed_s, last_bearing, recovery_count, sweep_idx, sweep_offset_x, sweep_offset_y, aligned_ticks, target_idx, no_lock_ticks, engage_red_hits, blocked_flank_streak
             now_t = state.elapsed_s
+            tick_clock_0 = self._clock()
+
+            def _elapsed_now() -> float:
+                return now_t + max(0.0, self._clock() - tick_clock_0)
+
             mm = state.minimap
 
             if state.hud is not None:
@@ -797,9 +945,11 @@ class ActionRunner:
                 nonlocal phase, phase_end_t, engage_start_t, aligned_ticks, no_lock_ticks, engage_red_hits, sweep_idx, sweep_offset_x, sweep_offset_y
                 nonlocal recover_cooldown_until_t, recover_start_health
                 _set_movement(False)
+                _set_aim(True)
+                cur_t = _elapsed_now()
                 phase = "engage"
-                engage_start_t = now_t
-                phase_end_t = now_t + engage_phase_s
+                engage_start_t = cur_t
+                phase_end_t = cur_t + engage_phase_s
                 aligned_ticks = 0
                 no_lock_ticks = 0
                 engage_red_hits = 0
@@ -807,10 +957,10 @@ class ActionRunner:
                 sweep_offset_x = 0
                 sweep_offset_y = 0
                 if cooldown_s > 0.0:
-                    recover_cooldown_until_t = now_t + cooldown_s
+                    recover_cooldown_until_t = cur_t + cooldown_s
                 recover_start_health = None
                 _reset_motion_tracker()
-                _set_aim(True)
+                cam_fb.reset()
 
             def _abort_low_health(*, tap_cover: bool) -> str:
                 _set_aim(False)
@@ -1040,23 +1190,33 @@ class ActionRunner:
                             self.input.key_up(flank_key)
                         if abs(enemy.bearing) > 0.30:
                             self._steer_camera(-45 if flank_key == "a" else 45, 0)
+                        post_flank_t = _elapsed_now()
                         flank_move_s = min(move_phase_s, 0.65)
-                        flank_unblock_until_t = now_t + 0.75 + flank_move_s
+                        flank_unblock_until_t = post_flank_t + flank_move_s
                         phase = "move"
                         phase_end_t = flank_unblock_until_t
                         min_move_until_t = flank_unblock_until_t
                         engage_cooldown_until_t = flank_unblock_until_t
                         _reset_motion_tracker()
+                        cam_fb.reset()
                         return None
                     phase = "move"
                     phase_end_t = now_t + move_phase_s
                     min_move_until_t = now_t + move_phase_s
                     engage_cooldown_until_t = now_t + move_phase_s
                     _reset_motion_tracker()
+                    cam_fb.reset()
 
             if phase == "engage":
                 _set_movement(False)
                 _set_aim(True)
+                cam_fb.observe(
+                    state.capture.image,
+                    mode="advance_under_fire",
+                    logger=self._logger,
+                    input_ctrl=self.input,
+                    aim_button="right",
+                )
                 reticle = detect_red_reticle(state.capture.image)
                 if reticle.is_red:
                     aligned_ticks = 0
@@ -1064,8 +1224,55 @@ class ActionRunner:
                     engage_red_hits += 1
                     blocked_flank_streak = 0
                     self._fire_bursts("left", bursts=3, hold_s=0.03, gap_s=0.025, reason="red_reticle")
+                    cam_fb.fired_last_tick = True
                     if recoil_comp_dy > 0:
                         self.input.mouse_delta(0, int(recoil_comp_dy) * 2, steps=1, duration_s=0.01)
+                        cam_fb.last_cmd_dy = int(recoil_comp_dy) * 2
+                    return None
+
+                if reticle.is_visible and (enemy is None or abs(enemy.bearing) <= 0.45):
+                    visual = self._detect_visual_target(state.capture.image, mm, enemy)
+                else:
+                    visual = None
+
+                if visual is not None:
+                    cam_fb.visual_steer_count += 1
+                    if cam_fb.visual_steer_count == 1 or cam_fb.visual_steer_count % 5 == 0:
+                        self._logger.log(
+                            tool="runner",
+                            action="visual_target_steer",
+                            status="ok",
+                            details={
+                                "mode": "advance_under_fire",
+                                "aim_point": [round(visual.target.aim_point[0], 3), round(visual.target.aim_point[1], 3)],
+                                "dx": visual.dx,
+                                "dy": visual.dy,
+                                "source": visual.target.source,
+                                "confidence": round(visual.target.confidence, 3),
+                            },
+                        )
+                    if visual.dx != 0 or visual.dy != 0:
+                        self._steer_camera(visual.dx, visual.dy)
+                        cam_fb.last_cmd_dx = visual.dx
+                        cam_fb.last_cmd_dy = visual.dy
+                    no_lock_ticks += 1
+                    if no_lock_ticks >= 16:
+                        no_lock_ticks = 0
+                        target_idx += 1
+                        _recenter_sweep()
+                        return None
+                    if abs(visual.error_x) <= 0.04 and abs(visual.error_y) <= 0.04:
+                        aligned_ticks += 1
+                        if no_lock_ticks in (4, 10):
+                            self._fire_bursts("left", bursts=2, hold_s=0.03, gap_s=0.03, reason="suppressive")
+                            cam_fb.fired_last_tick = True
+                            if recoil_comp_dy > 0:
+                                sup_scale = 1 if no_lock_ticks == 4 else 2
+                                comp_dy = int(recoil_comp_dy) * sup_scale
+                                self.input.mouse_delta(0, comp_dy, steps=1, duration_s=0.01)
+                                cam_fb.last_cmd_dy = comp_dy
+                    else:
+                        aligned_ticks = 0
                     return None
 
                 if enemy is not None:
@@ -1073,6 +1280,7 @@ class ActionRunner:
                         dx = self._ads_steer_dx(enemy.bearing, steer_gain=engage_steer_gain)
                         if dx != 0:
                             self._steer_camera(dx, 0)
+                            cam_fb.last_cmd_dx = dx
                     no_lock_ticks += 1
                     if no_lock_ticks >= 16:
                         no_lock_ticks = 0
@@ -1083,9 +1291,12 @@ class ActionRunner:
                         aligned_ticks += 1
                         if no_lock_ticks in (6, 12):
                             self._fire_bursts("left", bursts=2, hold_s=0.03, gap_s=0.03, reason="suppressive")
+                            cam_fb.fired_last_tick = True
                             if recoil_comp_dy > 0:
                                 sup_scale = 1 if no_lock_ticks == 6 else 2
-                                self.input.mouse_delta(0, int(recoil_comp_dy) * sup_scale, steps=1, duration_s=0.01)
+                                comp_dy = int(recoil_comp_dy) * sup_scale
+                                self.input.mouse_delta(0, comp_dy, steps=1, duration_s=0.01)
+                                cam_fb.last_cmd_dy = comp_dy
                     else:
                         aligned_ticks = 0
 
@@ -1096,6 +1307,8 @@ class ActionRunner:
                         self.input.mouse_delta(dx, dy, steps=2, duration_s=0.03)
                         sweep_offset_x += dx
                         sweep_offset_y += dy
+                        cam_fb.last_cmd_dx += dx
+                        cam_fb.last_cmd_dy += dy
                 return None
 
             # Move phase
@@ -1663,6 +1876,7 @@ class ActionRunner:
         no_reticle_ticks = 0
         edge_shift_attempts = 0
         suppressive_no_red_count = 0
+        cam_fb = _CameraFeedback(enabled=self._enable_camera_motion_tracking)
 
         def _recenter_sweep() -> None:
             nonlocal sweep_idx, sweep_offset_x, sweep_offset_y
@@ -1682,11 +1896,13 @@ class ActionRunner:
                 peek_start_t = now_t
                 if aim_settle_s > 0:
                     self._sleep(aim_settle_s)
+                cam_fb.reset()
             elif not want_peek and is_peeking:
                 _recenter_sweep()
                 self.input.mouse_up(aim_button)
                 is_peeking = False
                 no_reticle_ticks = 0
+                cam_fb.reset()
 
         def _handle_blocked_cover(now_t: float, enemy: RadarTarget, block_reason: str) -> Optional[str]:
             nonlocal edge_shift_attempts, no_reticle_ticks, no_lock_ticks, aligned_ticks, suppressive_no_red_count, toggled_cover_for_flank
@@ -1795,6 +2011,13 @@ class ActionRunner:
                 return None
 
             _set_peek(True, now_t)
+            _, yaw_stalled = cam_fb.observe(
+                state.capture.image,
+                mode="cover_peek_combat",
+                logger=self._logger,
+                input_ctrl=self.input,
+                aim_button=aim_button,
+            )
 
             reticle = detect_red_reticle(state.capture.image)
             if reticle.is_red:
@@ -1810,8 +2033,10 @@ class ActionRunner:
                 clamped_ticks = 0
                 last_clamped_bearing = None
                 self._fire_bursts(fire_button, bursts=3, hold_s=0.03, gap_s=0.025, reason="red_reticle")
+                cam_fb.fired_last_tick = True
                 if recoil_comp_dy > 0:
                     self.input.mouse_delta(0, int(recoil_comp_dy) * 2, steps=1, duration_s=0.01)
+                    cam_fb.last_cmd_dy = int(recoil_comp_dy) * 2
                 shots_fired += 1
                 if max_shots is not None and shots_fired >= max_shots:
                     _recenter_sweep()
@@ -1847,8 +2072,9 @@ class ActionRunner:
                         res = _handle_blocked_cover(now_t, enemy, "no_reticle")
                         return res
 
-                # Flanking / cover-clamped enemy (> 0.45): 2-stage recovery (free-look+sidestep, then q cover-break + aim turn) if healthy.
-                if abs(enemy.bearing) > 0.45:
+                # Flanking / cover-clamped enemy (> 0.45) or sustained optical-flow yaw stall (> 0.25):
+                # 2-stage recovery (free-look+sidestep, then q cover-break + aim turn) if healthy.
+                if abs(enemy.bearing) > 0.45 or (yaw_stalled and abs(enemy.bearing) > 0.25):
                     if (
                         last_clamped_bearing is not None
                         and (enemy.bearing * last_clamped_bearing) > 0
@@ -1857,6 +2083,8 @@ class ActionRunner:
                         clamped_ticks += 1
                     else:
                         clamped_ticks = 1
+                    if yaw_stalled and abs(enemy.bearing) > 0.25:
+                        clamped_ticks = max(clamped_ticks, 5)
                     last_clamped_bearing = enemy.bearing
 
                     healthy_for_flank = not mm.minimap_visible or mm.health_ratio >= flank_recovery_min_health
@@ -1934,6 +2162,58 @@ class ActionRunner:
                     last_clamped_bearing = None
                     toggled_cover_for_flank = False
 
+                if reticle.is_visible and abs(enemy.bearing) <= 0.45:
+                    visual = self._detect_visual_target(state.capture.image, mm, enemy)
+                else:
+                    visual = None
+
+                if visual is not None:
+                    cam_fb.visual_steer_count += 1
+                    if cam_fb.visual_steer_count == 1 or cam_fb.visual_steer_count % 5 == 0:
+                        self._logger.log(
+                            tool="runner",
+                            action="visual_target_steer",
+                            status="ok",
+                            details={
+                                "mode": "cover_peek_combat",
+                                "aim_point": [round(visual.target.aim_point[0], 3), round(visual.target.aim_point[1], 3)],
+                                "dx": visual.dx,
+                                "dy": visual.dy,
+                                "source": visual.target.source,
+                                "confidence": round(visual.target.confidence, 3),
+                            },
+                        )
+                    if visual.dx != 0 or visual.dy != 0:
+                        self._steer_camera(visual.dx, visual.dy)
+                        cam_fb.last_cmd_dx = visual.dx
+                        cam_fb.last_cmd_dy = visual.dy
+                    no_lock_ticks += 1
+                    if no_lock_ticks >= 16:
+                        no_lock_ticks = 0
+                        target_idx += 1
+                        _recenter_sweep()
+                        return None
+                    if abs(visual.error_x) <= 0.04 and abs(visual.error_y) <= 0.04:
+                        aligned_ticks += 1
+                        if no_lock_ticks in (4, 10):
+                            self._fire_bursts(fire_button, bursts=2, hold_s=0.03, gap_s=0.03, reason="suppressive")
+                            cam_fb.fired_last_tick = True
+                            if recoil_comp_dy > 0:
+                                sup_scale = 1 if no_lock_ticks == 4 else 2
+                                comp_dy = int(recoil_comp_dy) * sup_scale
+                                self.input.mouse_delta(0, comp_dy, steps=1, duration_s=0.01)
+                                cam_fb.last_cmd_dy = comp_dy
+                            shots_fired += 1
+                            suppressive_no_red_count += 1
+                            if max_shots is not None and shots_fired >= max_shots:
+                                _recenter_sweep()
+                                return "suppressive_shots_done"
+                            if suppressive_no_red_count >= 6:
+                                return _handle_blocked_cover(now_t, enemy, "zero_red_suppressive")
+                    else:
+                        aligned_ticks = 0
+                    return None
+
                 # Keep aim held in cover (releasing right pulls back into cover and resets cover yaw).
                 if abs(enemy.bearing) > bearing_deadband:
                     steer_cadence_ticks += 1
@@ -1945,6 +2225,7 @@ class ActionRunner:
                                 if abs(dx) >= 60:
                                     _recenter_sweep()
                                 self._steer_camera(dx, 0)
+                                cam_fb.last_cmd_dx = dx
                         if large_steer_ticks <= 2:
                             aligned_ticks = 0
                             return None
@@ -1955,6 +2236,7 @@ class ActionRunner:
                             dx = self._ads_steer_dx(enemy.bearing, steer_gain=steer_gain)
                             if dx != 0:
                                 self._steer_camera(dx, 0)
+                                cam_fb.last_cmd_dx = dx
                 else:
                     steer_cadence_ticks = 0
                     large_steer_ticks = 0
@@ -1972,9 +2254,12 @@ class ActionRunner:
                         aligned_ticks += 1
                         if no_lock_ticks in (6, 12):
                             self._fire_bursts(fire_button, bursts=2, hold_s=0.03, gap_s=0.03, reason="suppressive")
+                            cam_fb.fired_last_tick = True
                             if recoil_comp_dy > 0:
                                 sup_scale = 1 if no_lock_ticks == 6 else 2
-                                self.input.mouse_delta(0, int(recoil_comp_dy) * sup_scale, steps=1, duration_s=0.01)
+                                comp_dy = int(recoil_comp_dy) * sup_scale
+                                self.input.mouse_delta(0, comp_dy, steps=1, duration_s=0.01)
+                                cam_fb.last_cmd_dy = comp_dy
                             shots_fired += 1
                             suppressive_no_red_count += 1
                             if max_shots is not None and shots_fired >= max_shots:
@@ -1994,6 +2279,8 @@ class ActionRunner:
                     self.input.mouse_delta(dx, dy, steps=2, duration_s=0.03)
                     sweep_offset_x += dx
                     sweep_offset_y += dy
+                    cam_fb.last_cmd_dx += dx
+                    cam_fb.last_cmd_dy += dy
             return None
 
         res = self._run_loop(

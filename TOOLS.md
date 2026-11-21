@@ -54,6 +54,7 @@ Sends macOS Quartz `CGEvent` keyboard/mouse events (`CGEventInputBackend`) with 
 - **Fault-Tolerant Release**: `release_all()` loops over every held key and mouse button individually so one backend error never prevents releasing the remaining inputs.
 - **Process Exit & Signals**: `atexit` and `SIGINT`/`SIGTERM` handlers release all held keys/buttons on active controllers before chaining prior handlers.
 - **Hard Timeout Watchdog**: Every timed action (`hold`, `tap`, `click`, `mouse_delta`, `run_sequence`) starts a `threading.Timer` watchdog (`default_timeout_s=10.0`, overrideable via `timeout_s` / `--timeout`). On expiration, the watchdog immediately calls `release_all()` and interrupts the action with `InputTimeoutError`.
+- **Intrinsic Key Flags**: `CGEventInputBackend` preserves `kCGEventFlagMaskNumericPad | kCGEventFlagMaskSecondaryFn` on arrow keys (`up`/`down`/`left`/`right`) and `kCGEventFlagMaskSecondaryFn` on `f1..f12`/navigation keys so Wine recognizes extended key presses cleanly.
 - **Live Opt-In**: CLI requires `--live` (vs `--dry-run`). **STRICT OWNERSHIP**: ONLY `player` may pass `--live` or instantiate `CGEventInputBackend`.
 
 ### CLI Usage
@@ -175,3 +176,13 @@ Fast local ~8–12 Hz perception + control loops (`ActionRunner`) combining `cap
 - `switch_character(character, method="hotkey" | "wheel")`
 
 Automatically releases ALL held inputs in `finally` on `WASTED`/`BUSTED`/`MISSION_FAILED`/`MISSION_PASSED` banners, new `top_left_help` / subtitle changes, rapid `health_drop`, target reached, or `max_duration_s` timeout.
+
+---
+
+## 8. Screen-Space Perception & Camera Optical-Flow (`gameplayer.perception`)
+
+Black-box screen-space enemy targeting and camera-response diagnostics used by `ActionRunner` (`advance_under_fire` and `cover_peek_combat`):
+- `VisionHumanDetectorBackend`: macOS `VNDetectHumanRectanglesRequest` (`upperBodyOnly=True`) on upscaled horizon/minimap-bearing-guided ROIs (`~15–30ms` post-warmup).
+- `SilhouetteHumanDetectorBackend`: fast pure-`numpy` upright figure fallback for offline/synthetic frames and partial occlusions.
+- `select_visual_enemy_target(...)`: filters out foreground player (Trevor) and blue-ally boxes, matches candidates to minimap `bearing`, and outputs proportional ADS `(dx, dy)` toward visible enemy upper torsos (`visual_target_steer`).
+- `CameraMotionTracker`: 2D FFT phase-correlation over background horizon patches (`<5ms`) measuring actual `(delta_yaw_px, delta_pitch_px)` to detect cover yaw clamping / Wine drops (`camera_yaw_stalled`) and upward recoil pitch drift (`camera_recoil_comp`).

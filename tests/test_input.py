@@ -310,6 +310,8 @@ def test_cgevent_backend_warps_cursor_back_to_center_when_offscreen(monkeypatch)
         kCGEventFlagMaskControl = 2
         kCGEventFlagMaskAlternate = 4
         kCGEventFlagMaskCommand = 8
+        kCGEventFlagMaskNumericPad = 16
+        kCGEventFlagMaskSecondaryFn = 32
 
         def __init__(self) -> None:
             self.suppression_interval = None
@@ -341,6 +343,9 @@ def test_cgevent_backend_warps_cursor_back_to_center_when_offscreen(monkeypatch)
 
         def CGEventCreateMouseEvent(self, src, ev_type, pos, btn):
             return {"type": ev_type, "pos": pos, "btn": btn}
+
+        def CGEventCreateKeyboardEvent(self, src, keycode, is_down):
+            return {"kind": "key", "keycode": keycode, "down": is_down}
 
         def CGEventSetIntegerValueField(self, ev, field, val):
             ev[field] = val
@@ -399,3 +404,49 @@ def test_input_controller_click_window_center_anchors_warps_and_releases(tmp_pat
     assert ("mouse_down", "right") in backend.events
     assert ("mouse_up", "right") in backend.events
     assert ctrl.held_buttons == frozenset()
+
+
+def test_cgevent_backend_preserves_arrow_and_fn_key_flags(monkeypatch) -> None:
+    class _FlagFakeQuartz:
+        kCGEventSourceStateHIDSystemState = 1
+        kCGHIDEventTap = 0
+        kCGEventFlagMaskShift = 1 << 17
+        kCGEventFlagMaskControl = 1 << 18
+        kCGEventFlagMaskAlternate = 1 << 19
+        kCGEventFlagMaskCommand = 1 << 20
+        kCGEventFlagMaskNumericPad = 1 << 21
+        kCGEventFlagMaskSecondaryFn = 1 << 23
+
+        def __init__(self) -> None:
+            self.posted: list[dict[str, object]] = []
+
+        def CGEventSourceCreate(self, state):
+            return object()
+
+        def CGEventSourceSetLocalEventsSuppressionInterval(self, src, interval):
+            pass
+
+        def CGEventCreateKeyboardEvent(self, src, keycode, is_down):
+            return {"keycode": keycode, "down": is_down, "flags": 0}
+
+        def CGEventSetFlags(self, ev, flags):
+            ev["flags"] = flags
+
+        def CGEventPost(self, tap, ev):
+            self.posted.append(ev)
+
+    fake_q = _FlagFakeQuartz()
+    import sys
+    monkeypatch.setitem(sys.modules, "Quartz", fake_q)
+    backend = gp_input.CGEventInputBackend()
+    backend.key_down("up")
+    backend.key_up("up")
+    backend.key_down("f5")
+    backend.key_down("w")
+
+    expected_arrow = fake_q.kCGEventFlagMaskNumericPad | fake_q.kCGEventFlagMaskSecondaryFn
+    assert fake_q.posted[0]["keycode"] == gp_input.KEYCODES["up"]
+    assert fake_q.posted[0]["flags"] == expected_arrow
+    assert fake_q.posted[1]["flags"] == expected_arrow
+    assert fake_q.posted[2]["flags"] == fake_q.kCGEventFlagMaskSecondaryFn
+    assert fake_q.posted[3]["flags"] == 0
