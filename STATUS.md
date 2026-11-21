@@ -4,12 +4,12 @@ Updated by `watcher` (and initialized by `toolsmith` in Phase 0).
 
 ## Current Run State
 
-- **Current Mission / Checkpoint**: Prologue — Shutter Charge -> Yard Shootout (`GoPostal` cover objective cleared `#337`, active `player-5` session)
-- **Consecutive Failures**: `0` deaths on current checkpoint
-- **Minutes on Checkpoint**: `0` (`#337` Shutter Room cover cleared at `01:33 PST`)
-- **LLM Turns per Checkpoint**: `1`
-- **Minutes Since Last Commit**: `0` (Cycle 10 commit)
-- **Active Issues**: Live scoreboard snapshots written to gitignored `logs/status.json` (`gameplayer.status_store`); Cycle 10 adds center-pillar `classify_posture` (`0.34..0.58`) and `wrong_prop_cover` exit-and-advance recovery. `capture_daemon` active.
+- **Current Mission / Checkpoint**: Prologue — Yard Shootout (`GoPostal` shutter open `#338`, active `player-5` session)
+- **Consecutive Failures**: `1` death on Yard Shootout (`#341`)
+- **Minutes on Checkpoint**: `8` (`#338` shutter opened at `01:37 PST`)
+- **LLM Turns per Checkpoint**: `2`
+- **Minutes Since Last Commit**: `0` (Cycle 11 commit)
+- **Active Issues**: Mandatory Upgrade Trigger `#343`/`#344`: `advance_under_fire` logged `19` `visual_target_steer`s with `0` `fire_burst`s (`no_lock_ticks in (4, 10)` skipped dead-center locks) plus pillar/Trevor silhouette pulls. `capture_daemon` active.
 
 ## Self-Improvement Log
 
@@ -60,4 +60,5 @@ Updated by `watcher` (and initialized by `toolsmith` in Phase 0).
 | Checkpoint 4 (Cycle 7b) | Live telemetry (`#317`): `14 * 0.225 < 4.0px` returned `level_camera_pitch: unresponsive` and `approach_and_enter_cover()` toggled `q` `38` times. | `79b292e`: Adaptive `probe_dy >= 24` from `_pitch_px_per_dy`, `0.09s` calibration settle, pre-cover bearing alignment, and non-untoggling `"a"`/`"d"` cover slides. | `@verifier-3` PASS (`#319`, `117 passed`); `calibrate_controls()` & `target_reached` (`0.0456`) verified live (`#321`). |
 | Checkpoint 4 (Cycle 8) | Shutter cover tarp-blocked corner (`#321`, `q_after.png`) & intermittent `Notes(pid=6487)` focus theft (`#322`). | `eb21097`: Added `stop_on_focus_loss=True` (`"focus_lost"` early abort + `release_all`), crate-orbit probes (`"s"` + `"d"`/`"a"` + `"w"`) in `approach_and_enter_cover()`, & Checkpoint 4 retrospective docs. | `@verifier-3` PASS (`#327`, `119 passed`); caught live `Notes` `Fn+Q` loop (`#330`). |
 | Checkpoint 4 (Cycle 8b / 9) | `CGEventCreateKeyboardEvent` returned `0x20800000` (`kCGEventFlagMaskSecondaryFn`), turning `'q'` into macOS `Fn+Q` Quick Note (`Notes(pid=6487)` `#328`/`#330`), and interior red alarm wash faked `10` `"red"` enemy blips (`p5_exit_side2.png`, `#331`). | `645e456`: Strip `kCGEventFlagMaskSecondaryFn | kCGEventFlagMaskNumericPad` in `CGEventInputBackend._clear_mod_mask` (only re-applied on arrows/fn via `_key_intrinsic_flags`), and tighten `minimap._color_masks["red"]` (`r >= 206`, `g/b <= 68`, `r - g/b >= 140`) to reject translucent alarm washes while preserving real yard blips. | `@verifier-3` PASS (`#333`, `120 passed`); live `q` cover snaps & Shutter Room cleared (`#337`). |
-| Checkpoint 5 (Cycle 10) | Narrow center pillar cover (`0.34..0.58`) missed by `classify_posture`, and wrong-prop `q` cover snap while `yellow > 0.08` away (`clips/check_0928.mp4`, `#335`). | Cycle 10: Add center-pillar `(0.34..0.58)` cover band & `"unknown"` lower-half fallback in `classify_posture()`, add `wrong_prop_cover` exit-and-advance recovery to `approach_and_enter_cover()`, and append Checkpoint 5 retrospective. | Pending `@verifier-3` QA. |
+| Checkpoint 5 (Cycle 10) | Narrow center pillar cover (`0.34..0.58`) missed by `classify_posture`, and wrong-prop `q` cover snap while `yellow > 0.08` away (`clips/check_0928.mp4`, `#335`). | `4aeca4e`: Add center-pillar `(0.34..0.58)` cover band & `"unknown"` lower-half fallback in `classify_posture()`, add `wrong_prop_cover` exit-and-advance recovery to `approach_and_enter_cover()`, and append Checkpoint 5 retrospective. | `@verifier-3` PASS (`#340`, `121 passed`); Shutter Room cleared & opened (`#338`). |
+| Checkpoint 5 (Cycle 11) | `0` `fire_burst`s despite `19` `visual_target_steer`s (`clips/check_0940.mp4`, `#343`) because visual alignment checked `no_lock_ticks in (4, 10)` plus Trevor/pillar silhouette pulls (`[0.067, 0.289]`). | Cycle 11: Fire immediately when visually aligned (`<= 0.045`, `aligned_ticks == 1 or aligned_ticks % 4 == 0`) with zero-sum micro-dither in `advance_under_fire` & `cover_peek_combat`, and restrict `_detect_visual_target` / `select_visual_enemy_target` against Trevor (`bottom >= 0.72`) and pillar/out-of-cone artifacts (`±0.14` silhouette ROI, `±0.24` cone). | Pending `@verifier-3` QA. |

@@ -269,9 +269,11 @@ def _is_player_foreground_box(target: ScreenTarget) -> bool:
     x, y, w, h = target.bbox
     ax, _ay = target.aim_point
     bottom = y + h
-    if ax < 0.46 and bottom >= 0.76 and h >= 0.22:
+    if ax < 0.46 and bottom >= 0.72 and (h >= 0.22 or w >= 0.14):
         return True
-    if x < 0.43 and h >= 0.36 and bottom >= 0.80:
+    if x < 0.43 and bottom >= 0.72 and (h >= 0.28 or w >= 0.14):
+        return True
+    if x < 0.46 and w >= 0.14 and h >= 0.28:
         return True
     return False
 
@@ -316,6 +318,12 @@ def select_visual_enemy_target(
     for cand in candidates:
         if _is_player_foreground_box(cand):
             continue
+        if cand.source == "silhouette":
+            cx, _cy, cw, ch = cand.bbox
+            if cw >= 0.14 or ch >= 0.32:
+                continue
+            if cx < 0.20 and (preferred_enemy is None or preferred_enemy.bearing >= -0.35):
+                continue
         ax, ay = cand.aim_point
         if ax < 0.06 or ax > 0.94 or ay < 0.18 or ay > 0.80:
             continue
@@ -330,7 +338,7 @@ def select_visual_enemy_target(
         score = cand.confidence
         if pref_x is not None:
             dist_pref = abs(ax - pref_x)
-            if dist_pref > 0.38:
+            if dist_pref > 0.24:
                 continue
             score -= dist_pref * 1.1
         elif red_xs:

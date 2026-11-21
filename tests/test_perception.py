@@ -111,3 +111,27 @@ def test_vision_human_detector_runs_on_frame_without_error() -> None:
         img = _draw_person_scene(0.60, 0.48, width=640, height=360)
         targets = backend.detect_humans(img)
         assert isinstance(targets, list)
+
+
+def test_select_visual_enemy_rejects_trevor_pillar_and_out_of_cone_candidates() -> None:
+    mm_frame = make_synthetic_minimap_frame(
+        health_ratio=0.95,
+        red_points=[(0.54, 0.44)],  # bearing ~ +0.045 -> pref_x ~ 0.60
+    )
+    mm = inspect_minimap(mm_frame)
+    cands = [
+        # Trevor third-person ADS shoulder clipped by ROI bottom=0.76 -> bottom=0.752
+        ScreenTarget(bbox=(0.31, 0.45, 0.15, 0.302), aim_point=(0.385, 0.56), confidence=0.95, source="vision_human"),
+        # Wide silhouette pillar/wall artifact
+        ScreenTarget(bbox=(0.56, 0.30, 0.16, 0.25), aim_point=(0.64, 0.39), confidence=0.90, source="silhouette"),
+        # Left-pillar edge silhouette (x < 0.20 while enemy is ahead)
+        ScreenTarget(bbox=(0.06, 0.25, 0.04, 0.12), aim_point=(0.08, 0.29), confidence=0.88, source="silhouette"),
+        # Out-of-cone target (> 0.24 from expected_x ~ 0.60)
+        ScreenTarget(bbox=(0.88, 0.40, 0.03, 0.10), aim_point=(0.895, 0.44), confidence=0.92, source="vision_human"),
+        # Valid silhouette enemy within ±0.24 cone
+        ScreenTarget(bbox=(0.62, 0.42, 0.03, 0.10), aim_point=(0.635, 0.46), confidence=0.68, source="silhouette"),
+    ]
+    selected = select_visual_enemy_target(cands, mm, preferred_enemy=mm.nearest_enemy)
+    assert selected is not None
+    assert abs(selected.target.aim_point[0] - 0.635) < 1e-6
+    assert selected.target.source == "silhouette"

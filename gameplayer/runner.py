@@ -311,6 +311,8 @@ class ActionRunner:
             self._human_detector = self._silhouette_fallback
         return self._human_detector
 
+    _VISUAL_MICRO_DITHER_STEPS: tuple[tuple[int, int], ...] = ((6, -4), (-12, 0), (6, 8), (0, -4))
+
     def _detect_visual_target(
         self,
         image: Image.Image,
@@ -320,22 +322,76 @@ class ActionRunner:
         detector = self._get_human_detector()
         if detector is None:
             return None
+
+        has_fov_enemy = preferred_enemy is not None and abs(preferred_enemy.bearing) <= 0.45
+        cx = expected_screen_x_from_bearing(preferred_enemy.bearing) if has_fov_enemy else 0.5
+        sil_roi: tuple[float, float, float, float] = (
+            max(0.05, cx - 0.14),
+            0.20,
+            min(0.95, cx + 0.14),
+            0.76,
+        )
+
+        def _valid_silhouette(cands: Sequence[ScreenTarget]) -> list[ScreenTarget]:
+            out: list[ScreenTarget] = []
+            bearing = preferred_enemy.bearing if preferred_enemy is not None else 0.0
+            for c in cands:
+                bx, _by, bw, bh = c.bbox
+                if bw >= 0.14 or bh >= 0.32:
+                    continue
+                if bx < 0.20 and (preferred_enemy is None or bearing >= -0.35):
+                    continue
+                out.append(c)
+            return out
+
+        if isinstance(detector, SilhouetteHumanDetectorBackend):
+            if preferred_enemy is None or abs(preferred_enemy.bearing) > 0.35:
+                return None
+            cands = _valid_silhouette(detector.detect_humans(image, roi=sil_roi))
+            return select_visual_enemy_target(cands, minimap, preferred_enemy=preferred_enemy)
+
         if preferred_enemy is not None and abs(preferred_enemy.bearing) <= 0.35:
-            cx = expected_screen_x_from_bearing(preferred_enemy.bearing)
             roi: tuple[float, float, float, float] = (
-                max(0.05, cx - 0.28),
+                max(0.05, cx - 0.24),
                 0.20,
-                min(0.95, cx + 0.28),
+                min(0.95, cx + 0.24),
                 0.76,
             )
         else:
             roi = (0.15, 0.20, 0.88, 0.76)
 
         candidates = detector.detect_humans(image, roi=roi)
-        if not candidates and isinstance(detector, VisionHumanDetectorBackend):
+        selected = select_visual_enemy_target(candidates, minimap, preferred_enemy=preferred_enemy)
+        if selected is None and isinstance(detector, VisionHumanDetectorBackend):
             if preferred_enemy is not None and abs(preferred_enemy.bearing) <= 0.25:
-                candidates = self._silhouette_fallback.detect_humans(image, roi=roi)
-        return select_visual_enemy_target(candidates, minimap, preferred_enemy=preferred_enemy)
+                sil_cands = _valid_silhouette(self._silhouette_fallback.detect_humans(image, roi=sil_roi))
+                selected = select_visual_enemy_target(sil_cands, minimap, preferred_enemy=preferred_enemy)
+        return selected
+
+    def _handle_visual_aligned_tick(
+        self,
+        *,
+        fire_button: str,
+        aligned_ticks: int,
+        recoil_comp_dy: int,
+        cam_fb: _CameraFeedbackState,
+    ) -> bool:
+        """Fire immediately when visually aligned (tick 1, then every 4th tick) or micro-dither for red_reticle."""
+        if aligned_ticks == 1 or aligned_ticks % 4 == 0:
+            self._fire_bursts(fire_button, bursts=2, hold_s=0.03, gap_s=0.03, reason="suppressive")
+            cam_fb.fired_last_tick = True
+            if recoil_comp_dy > 0:
+                sup_scale = 1 if aligned_ticks == 1 else 2
+                comp_dy = int(recoil_comp_dy) * sup_scale
+                self.input.mouse_delta(0, comp_dy, steps=1, duration_s=0.01)
+                cam_fb.last_cmd_dy = comp_dy
+            return True
+        if aligned_ticks >= 2:
+            dx, dy = self._VISUAL_MICRO_DITHER_STEPS[(aligned_ticks - 2) % len(self._VISUAL_MICRO_DITHER_STEPS)]
+            self.input.mouse_delta(dx, dy, steps=1, duration_s=0.01)
+            cam_fb.last_cmd_dx += dx
+            cam_fb.last_cmd_dy += dy
+        return False
 
     def _snap_cover_on_health_drop(self, mode_name: str) -> None:
         self._tap_key_preserving_held("q", hold_s=0.08)
@@ -1943,19 +1999,18 @@ class ActionRunner:
                     no_lock_ticks += 1
                     if no_lock_ticks >= 16:
                         no_lock_ticks = 0
+                        aligned_ticks = 0
                         target_idx += 1
                         _recenter_sweep()
                         return None
-                    if abs(visual.error_x) <= 0.04 and abs(visual.error_y) <= 0.04:
+                    if abs(visual.error_x) <= 0.045 and abs(visual.error_y) <= 0.045:
                         aligned_ticks += 1
-                        if no_lock_ticks in (4, 10):
-                            self._fire_bursts("left", bursts=2, hold_s=0.03, gap_s=0.03, reason="suppressive")
-                            cam_fb.fired_last_tick = True
-                            if recoil_comp_dy > 0:
-                                sup_scale = 1 if no_lock_ticks == 4 else 2
-                                comp_dy = int(recoil_comp_dy) * sup_scale
-                                self.input.mouse_delta(0, comp_dy, steps=1, duration_s=0.01)
-                                cam_fb.last_cmd_dy = comp_dy
+                        self._handle_visual_aligned_tick(
+                            fire_button="left",
+                            aligned_ticks=aligned_ticks,
+                            recoil_comp_dy=recoil_comp_dy,
+                            cam_fb=cam_fb,
+                        )
                     else:
                         aligned_ticks = 0
                     return None
@@ -2879,19 +2934,18 @@ class ActionRunner:
                     no_lock_ticks += 1
                     if no_lock_ticks >= 16:
                         no_lock_ticks = 0
+                        aligned_ticks = 0
                         target_idx += 1
                         _recenter_sweep()
                         return None
-                    if abs(visual.error_x) <= 0.04 and abs(visual.error_y) <= 0.04:
+                    if abs(visual.error_x) <= 0.045 and abs(visual.error_y) <= 0.045:
                         aligned_ticks += 1
-                        if no_lock_ticks in (4, 10):
-                            self._fire_bursts(fire_button, bursts=2, hold_s=0.03, gap_s=0.03, reason="suppressive")
-                            cam_fb.fired_last_tick = True
-                            if recoil_comp_dy > 0:
-                                sup_scale = 1 if no_lock_ticks == 4 else 2
-                                comp_dy = int(recoil_comp_dy) * sup_scale
-                                self.input.mouse_delta(0, comp_dy, steps=1, duration_s=0.01)
-                                cam_fb.last_cmd_dy = comp_dy
+                        if self._handle_visual_aligned_tick(
+                            fire_button=fire_button,
+                            aligned_ticks=aligned_ticks,
+                            recoil_comp_dy=recoil_comp_dy,
+                            cam_fb=cam_fb,
+                        ):
                             shots_fired += 1
                             suppressive_no_red_count += 1
                             if max_shots is not None and shots_fired >= max_shots:

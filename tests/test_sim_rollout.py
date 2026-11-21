@@ -4,6 +4,7 @@ from PIL import Image, ImageDraw
 
 from gameplayer.hud import OcrLine
 from gameplayer.input import InputController
+from gameplayer.minimap import inspect_minimap
 from gameplayer.perception import classify_posture
 from gameplayer.playbooks import prologue_shutter_cover
 from gameplayer.runner import ActionRunner, LoopConfig
@@ -611,3 +612,90 @@ def test_classify_posture_center_pillar_and_approach_wrong_prop_recovery(tmp_pat
     assert any(r.get("action") == "wrong_prop_cover" for r in logs)
     assert any(r.get("action") == "exit_cover" for r in logs)
     assert backend.currently_held_keys == set()
+
+
+def test_aligned_visual_target_fires_immediately_on_non_4_10_tick_and_restricts_silhouette_roi(tmp_path) -> None:
+    """Re #343/#344: visual alignment reaching <= 0.045 on no_lock_ticks == 7 must fire immediately + micro-dither."""
+    from gameplayer.perception import ScreenTarget
+
+    class _ScriptedDetector:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def detect_humans(self, image: Image.Image, roi=None) -> list[ScreenTarget]:
+            del image, roi
+            self.calls += 1
+            # Calls 1..6: slightly off-center (+0.07 > 0.045) so no_lock_ticks increments to 6 without alignment.
+            if self.calls <= 6:
+                return [ScreenTarget(bbox=(0.55, 0.44, 0.04, 0.12), aim_point=(0.57, 0.50), confidence=0.80, source="vision_human")]
+            # Call 7+: aligned dead-center at [0.508, 0.495] (like clips/check_0940.mp4 09:41:41Z) -> must fire IMMEDIATELY!
+            return [ScreenTarget(bbox=(0.49, 0.44, 0.036, 0.12), aim_point=(0.508, 0.495), confidence=0.82, source="vision_human")]
+
+    # Enemy directly ahead (0.50, 0.44) with white reticle visible (never turns red).
+    frame = make_synthetic_minimap_frame(health_ratio=0.95, red_points=[(0.50, 0.44)])
+    ImageDraw.Draw(frame).rectangle((318, 178, 322, 182), fill=(240, 240, 240))
+
+    for mode in ("advance_under_fire", "cover_peek_combat"):
+        clock = FakeClock()
+        backend = RecordingInputBackend()
+        log_path = tmp_path / f"imm_{mode}.jsonl"
+        logger = TelemetryLogger(log_path)
+        ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
+        detector = _ScriptedDetector()
+        runner = ActionRunner(
+            ctrl,
+            ReplayWindowBackend(lambda _i: frame),
+            ScriptedHudOCR(lambda _i: {}),
+            logger,
+            clock,
+            clock.sleep,
+            human_detector=detector,
+        )
+        if mode == "advance_under_fire":
+            runner.advance_under_fire(
+                aim_settle_s=0.0,
+                move_phase_s=0.05,
+                engage_phase_s=1.2,
+                scan_pattern=(),
+                config=LoopConfig(max_duration_s=1.1, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+            )
+        else:
+            runner.cover_peek_combat(
+                enter_cover=False,
+                use_special=False,
+                aim_settle_s=0.0,
+                peek_burst_s=1.2,
+                scan_pattern=(),
+                config=LoopConfig(max_duration_s=1.1, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+            )
+
+        logs = read_telemetry(log_path, tool="runner")
+        bursts = [r for r in logs if r.get("action") == "fire_burst"]
+        assert len(bursts) >= 2, f"{mode} expected immediate burst on tick 7 + cadence burst, got {len(bursts)}"
+        # Must include micro-dither mouse_delta after aligned tick 1 when reticle didn't turn red
+        deltas = [ev[1][:2] for ev in backend.events if ev[0] == "mouse_delta"]
+        assert (6, -4) in deltas, f"{mode} expected micro-dither (6, -4), got {deltas}"
+        assert backend.currently_held_keys == set()
+        assert backend.currently_held_buttons == set()
+
+    # Silhouette fallback must reject left-pillar edge artifact outside ±0.14 cone of enemy ahead (0.50, 0.44 -> cx=0.50)
+    pillar_scene = make_synthetic_minimap_frame(health_ratio=0.95, red_points=[(0.50, 0.44)])
+    d = ImageDraw.Draw(pillar_scene)
+    d.rectangle((220, 72, 560, 270), fill=(150, 155, 160))
+    # Draw high-contrast left doorway pillar at x ~ 0.08..0.12 (would previously trigger [0.08, 0.29])
+    d.rectangle((45, 76, 72, 160), fill=(15, 15, 18))
+    sil_clock = FakeClock()
+    runner_sil = ActionRunner(
+        InputController(
+            RecordingInputBackend(),
+            TelemetryLogger(tmp_path / "sil.jsonl"),
+            clock=sil_clock,
+            sleep_fn=sil_clock.sleep,
+            register_signals=False,
+        ),
+        ReplayWindowBackend(lambda _i: pillar_scene),
+        ScriptedHudOCR(lambda _i: {}),
+        TelemetryLogger(tmp_path / "sil.jsonl"),
+    )
+    mm = inspect_minimap(pillar_scene)
+    assert runner_sil._detect_visual_target(pillar_scene, mm, mm.nearest_enemy) is None
