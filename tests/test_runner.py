@@ -331,7 +331,8 @@ def test_cover_peek_combat_enters_cover_activates_special_and_ducks_on_low_healt
     )
     f_low_hp = make_synthetic_minimap_frame(health_ratio=0.30, special_ratio=0.50, red_points=[(0.50, 0.40)])
     f_healed_clear = make_synthetic_minimap_frame(health_ratio=0.60, special_ratio=0.40, red_points=[])
-    frames = [f_healthy_enemy, f_low_hp, f_low_hp, f_healed_clear, f_healed_clear]
+    # First 2 frames are consumed by idempotent enter_cover(force=False) before/after posture check.
+    frames = [f_healthy_enemy, f_healthy_enemy, f_healthy_enemy, f_low_hp, f_low_hp, f_healed_clear, f_healed_clear]
 
     win_backend = ReplayWindowBackend(lambda idx: frames[min(idx, len(frames) - 1)])
     runner = ActionRunner(ctrl, win_backend, ScriptedHudOCR(lambda idx: {}), TelemetryLogger(tmp_path / "t.jsonl"), clock, clock.sleep)

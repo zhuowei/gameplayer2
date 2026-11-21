@@ -2613,8 +2613,7 @@ class ActionRunner:
             ),
         )
         if enter_cover:
-            self._tap_key_preserving_held("q", hold_s=0.08)
-            self._in_cover_hint = True
+            self.enter_cover(force=False)
         elif self._in_cover_hint is None:
             self._in_cover_hint = True
 
@@ -2759,6 +2758,13 @@ class ActionRunner:
                     peak_health = mm.health_ratio
                     if not duck_logged:
                         duck_logged = True
+                        duck_posture = classify_posture(state.capture.image, human_detector=self._get_human_detector())
+                        if (not self._in_cover_hint) or (
+                            duck_posture.state == "standing"
+                            and duck_posture.head_top_y is not None
+                            and duck_posture.head_top_y < 0.45
+                        ):
+                            self.enter_cover(force=False, settle_s=0.15)
                         self._logger.log(
                             tool="runner",
                             action="cover_duck",

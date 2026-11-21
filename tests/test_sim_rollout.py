@@ -870,3 +870,74 @@ def test_hood_roi_vision_pass_conserves_blind_ammo_and_persists_wider_flank_bias
     d_down_idx = next(i for i, ev in enumerate(backend_b.events) if ev == ("key_down", "d"))
     assert ("key_up", "d") in backend_b.events[d_down_idx + 1 :]
     assert backend_b.currently_held_keys == set()
+
+
+def test_cover_peek_combat_enter_cover_true_after_low_health_does_not_untoggle_q(tmp_path) -> None:
+    """Re #366/#367: advance_under_fire(low_health tap_cover=True) -> cover_peek_combat(enter_cover=True) must not double-tap q."""
+    from gameplayer.perception import ScreenTarget, VisionHumanDetectorBackend
+
+    f_low = make_synthetic_minimap_frame(health_ratio=0.16, red_points=[(0.50, 0.44)])
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    log_path = tmp_path / "no_untoggle.jsonl"
+    logger = TelemetryLogger(log_path)
+    ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
+    runner = ActionRunner(
+        ctrl,
+        ReplayWindowBackend(lambda _i: f_low),
+        ScriptedHudOCR(lambda _i: {}),
+        logger,
+        clock,
+        clock.sleep,
+    )
+
+    res_adv = runner.advance_under_fire(
+        cover_on_low_health=True,
+        config=LoopConfig(max_duration_s=2.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert res_adv.stop_reason == "low_health"
+    assert runner._in_cover_hint is True
+    assert backend.events.count(("key_down", "q")) == 1
+
+    # Calling cover_peek_combat(enter_cover=True) immediately afterward must keep cover intact (0 extra 'q' untoggle taps!).
+    runner.cover_peek_combat(
+        enter_cover=True,
+        use_special=False,
+        heal_wait_s=0.3,
+        config=LoopConfig(max_duration_s=0.35, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert backend.events.count(("key_down", "q")) == 1
+    logs = read_telemetry(log_path, tool="runner")
+    assert any(r.get("action") == "enter_cover_noop" for r in logs)
+
+    # 2) cover_duck with enter_cover=False while standing exposed (head_top_y < 0.45) guarantees enter_cover(force=False).
+    f_standing_low = make_synthetic_minimap_frame(health_ratio=0.16, red_points=[(0.50, 0.44)])
+    ImageDraw.Draw(f_standing_low).rectangle((110, 180, 560, 270), fill=(195, 205, 215))
+
+    class _StandingHeadVision(VisionHumanDetectorBackend):
+        def detect_humans(self, image: Image.Image, roi=None) -> list[ScreenTarget]:
+            del image, roi
+            return [ScreenTarget(bbox=(0.35, 0.28, 0.16, 0.50), aim_point=(0.43, 0.45), confidence=0.80, source="vision_human")]
+
+    clock2 = FakeClock()
+    backend2 = RecordingInputBackend()
+    log2 = tmp_path / "duck_enter.jsonl"
+    ctrl2 = InputController(backend2, TelemetryLogger(log2), clock=clock2, sleep_fn=clock2.sleep, register_signals=False)
+    runner2 = ActionRunner(
+        ctrl2,
+        ReplayWindowBackend(lambda _i: f_standing_low),
+        ScriptedHudOCR(lambda _i: {}),
+        TelemetryLogger(log2),
+        clock=clock2,
+        sleep_fn=clock2.sleep,
+        human_detector=_StandingHeadVision(),
+    )
+    runner2.cover_peek_combat(
+        enter_cover=False,
+        use_special=False,
+        heal_wait_s=0.25,
+        config=LoopConfig(max_duration_s=0.3, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert ("key_down", "q") in backend2.events
+    assert backend2.currently_held_keys == set()
+    assert backend2.currently_held_buttons == set()
