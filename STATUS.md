@@ -4,12 +4,12 @@ Updated by `watcher` (and initialized by `toolsmith` in Phase 0).
 
 ## Current Run State
 
-- **Current Mission / Checkpoint**: Prologue — Vault / Hallway Escort (`yellow_count=1`, active `player-4` session)
-- **Consecutive Failures**: `0` in current session (`47` historical `banner:MISSION_FAILED` prior to restart)
-- **Minutes on Checkpoint**: `4` (post-phone vault escort)
-- **LLM Turns per Checkpoint**: `2`
-- **Minutes Since Last Commit**: `0` (Cycle 3 commit)
-- **Active Issues**: Live scoreboard snapshots moved to gitignored `logs/status.json` (`gameplayer.status_store`); Cycle 3 fixed `follow_route_on_foot` off-axis indoor wall-grinding (`abs(bearing) > 0.35`). `capture_daemon` pid `1844` active.
+- **Current Mission / Checkpoint**: Prologue — Vault Exit / Shutter Corridor (`$177,000` collected, hostage guard cleared `#298`, active `player-4` session)
+- **Consecutive Failures**: `0` since hostage clear (`2` timing fails at `#296`–`#297` resolved; `49` historical `banner:MISSION_FAILED` total)
+- **Minutes on Checkpoint**: `3` (doorway exit after `#298`)
+- **LLM Turns per Checkpoint**: `3`
+- **Minutes Since Last Commit**: `0` (Cycle 5 commit)
+- **Active Issues**: Live scoreboard snapshots written to gitignored `logs/status.json` (`gameplayer.status_store`); Cycle 5 fixes narrow doorway-jamb `d/a` ping-pong (`captures/retro2_check.png`). `capture_daemon` pid `1844` active.
 
 ## Self-Improvement Log
 
@@ -52,4 +52,6 @@ Updated by `watcher` (and initialized by `toolsmith` in Phase 0).
 | 15:44 UTC | `recoil_comp_dy=2` (`2.0 px/round`) overcompensated `+404px` downward into snow/SUV panels (`clips/yard_low_red_1502.mp4`), `cover_peek_combat` timed out at `0.124` HP right after `cover_duck` (`clips/yard_advance_death_1505.mp4`, `#255`), & opaque walls stalled `6+` suppressive bursts (`#251`, `#253`, `#259`). | `a216bdc`: Calibrated `0.75 px/round` recoil comp (`+1`/`+2` on `no_lock_ticks` `6`/`12`, `+2` on `red_reticle`), completed `duck_until_t` sleep + `"low_health"` return (`<0.30` HP) on cover timeout, `<0.25` HP cover snap when enemy `<0.35`, `suppressive_no_red_count >= 6` stall breaker, & `recover_wait_s=4.0` + `+1.5s` heal extension. | `@verifier-2` PASS (`#260`, `94 passed`); merged & pushed to `main` (`#261`). |
 | Checkpoint 1 (Cycle 1) | `advance_flank_unblock` expired `flank_unblock_until_t` pre-sleep (`runner.py:1031-1048`), open `advance_under_fire` hit `2%` `red_reticle` (`#263`), blind mocks missed physics, & Wine dropped arrow flags (`#273`). | `410ee3f`: Fixed `advance_flank_unblock` post-sleep timing (`_elapsed_now()`), added `gameplayer/perception.py` (`VisionHumanDetectorBackend`, `SilhouetteHumanDetectorBackend`, `CameraMotionTracker`), `tests/sim_harness.py`, & arrow/fn `CGEvent` flags. | `@verifier-3` PASS (`#276`, `102 passed`); merged & pushed (`#277`). |
 | Checkpoint 1 (Cycle 2) | `q` toggle lacked visual posture check (`#230`/`#262`), inline scripts were brittle, `STATUS.md` dirtied `main`, & native `0x20000000` `CGEventGetFlags` bits were stripped (`#278`). | `f87c9a2`: Preserved non-modifier `CGEventGetFlags` bits, added `classify_posture` + idempotent `enter_cover()`/`exit_cover(min_health=0.42)`, `calibrate_controls()`, `replay_bench.py`, `playbooks.py`, & `status_store.py` (`logs/status.json`). | `@verifier-3` PASS (`#281`, `107 passed`); merged & pushed (`#282`); unblocked Prologue phone (`#283`) & `57–60%` clip visual lock rate. |
-| Checkpoint 1 (Cycle 3) | `follow_route_on_foot` ground nose-first into indoor bank wall with `bearing=-0.639` (`8x` timeouts, `#283`) repeating `a`/`d`+`space` vaults instead of backing off & turning toward off-axis route. | Cycle 3: On `abs(last_bearing) > 0.35` stuck recovery, `follow_route_on_foot` disables `vault`, backs up `"s"` (`0.25s`), and steers aggressively toward `last_bearing` (`steer_dx`); updated `LESSONS_LEARNED.md` & `STATUS.md`. | Pending `@verifier-3` QA. |
+| Checkpoint 1 (Cycle 3) | `follow_route_on_foot` ground nose-first into indoor bank wall with `bearing=-0.639` (`8x` timeouts, `#283`) repeating `a`/`d`+`space` vaults instead of backing off & turning toward off-axis route. | `176774f`, `6982ad6`: On `abs(last_bearing) > 0.35` stuck recovery, `follow_route_on_foot` disables `vault`, backs up `"s"` (`0.25s`), lowers `stuck_window_s=0.9`, and steers aggressively toward `last_bearing`. | `@verifier-3` PASS (`#285`, `#289`, `108 passed`); merged & pushed. |
+| Checkpoint 2 (Cycle 4) | Vault hallway navigation re-steered straight into walls behind the yellow objective dot (`p4_vault_in9.png`, `#291`). | `faed7a6`: Added Bug-algorithm `bypass_bearing_until_t` (`0.75s` post-sidestep) + immediate `0.25s` `"s"` back-off on all `follow_route_on_foot` stuck recoveries. | `@verifier-3` PASS (`#294`, `109 passed`); vault cash `$177,000` & hostage guard cleared (`#292`, `#298`). |
+| Checkpoint 2 (Cycle 5) | Left steel vault doorway jamb pinned `follow_route_on_foot` across `11` `d/a` ping-pong hops + `vault=True` (`captures/retro2_check.png`, `#299`). | Cycle 5: Commit `2` gentle lateral steps per side (`0.28s`, `0.42s`) via `((attempt - 1) // 2) % 2`, skip `vault` on `recovery_count >= 2`, extend `bypass_bearing_until_t` to `1.1s`, and update `LESSONS_LEARNED.md` & `STATUS.md`. | Pending `@verifier-3` QA. |

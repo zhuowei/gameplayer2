@@ -101,4 +101,13 @@ Escalating deep perception and control failures to `Carbon` specialists produced
   - Offline `gameplayer.replay_bench` across saved failure clips (`clips/yard_zero_red_1411.mp4`, `clips/yard_flank_stall_1551.mp4`, `clips/yard_low_red_1502.mp4`) verified `VisionHumanDetectorBackend` runs in `~11.5–23.3 ms/frame` post-warmup and locks **`57%–60%` (`17–18/30`, `6/10`)** of frames onto visible enemies where blind `red_reticle` had `0%`.
   - **Cycle 1 (`410ee3f`)**: Fixed `advance_flank_unblock` post-sleep timing (`_elapsed_now()`), added advancing-clock 2.5D simulator (`tests/sim_harness.py` with `0.75 px/rd` recoil, `1:2.8` ADS/hipfire sensitivity, `0.48` health regen cap, and box occluders), `Vision` + silhouette visual target steering, and FFT phase-correlation `CameraMotionTracker`.
   - **Cycle 2 (`f87c9a2`)**: Added `classify_posture` + idempotent `enter_cover()`/`exit_cover(min_health=0.42)`, `<=5s` `calibrate_controls()`, `gameplayer/replay_bench.py`, simulator-tested `gameplayer/playbooks.py`, and gitignored `logs/status.json` (`gameplayer/status_store.py`).
-  - **Cycle 3**: Fixed `follow_route_on_foot` indoor wall-grinding (`abs(last_bearing) > 0.35` now releases `w`/`lshift`, backs off `"s"` `0.25s`, skips off-axis wall-vaulting, and steers aggressively toward `last_bearing`).
+  - **Cycle 3 (`176774f`, `6982ad6`)**: Fixed `follow_route_on_foot` indoor wall-grinding (`abs(last_bearing) > 0.35` now releases `w`/`lshift`, backs off `"s"` `0.25s`, skips off-axis wall-vaulting, and steers aggressively toward `last_bearing`; lowered default `stuck_window_s=0.9`).
+
+---
+
+## 6. Checkpoint 2 (2026-11-21 00:02 PST)
+
+- **Progression & Telemetry (`faed7a6`, Cycle 5)**:
+  - `player-4` collected the `$177,000` vault cash (`#292`) and cleared the Prologue security-guard hostage ambush via `reticle_shot` headshot (`#298`) after two timing retries on the Trevor wheel switch (`#296`–`#297`).
+  - **Cycle 4 (`faed7a6`)**: Added Bug-algorithm `bypass_bearing_until_t` (`0.75s` post-sidestep) + immediate `"s"` back-off on all `follow_route_on_foot` stuck recoveries so indoor walls are bypassed instead of immediately turning back into the same wall.
+  - **Cycle 5 (`retro2_check.png`, `#299`)**: After the hostage shot (`08:00:07–08:01:17Z`), `11` `on_foot_stuck_recovery` calls oscillated `d, a, d, a` + `vault=True` against the narrow left steel vault doorway jamb because `0.55s` lateral hops overshot the doorway and alternating every step bounced jamb-to-door. Updated `_perform_on_foot_sidestep` / `follow_route_on_foot` to commit `2` gentle steps per side (`0.28s`, `0.42s`) before flipping (`((attempt - 1) // 2) % 2`), skip `vault` on doorway jamb retries (`attempt >= 2`), and extend `bypass_bearing_until_t` to `1.1s`.

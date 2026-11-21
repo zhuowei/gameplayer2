@@ -755,13 +755,10 @@ class ActionRunner:
         steer_dx: int = 0,
         back_up_s: float = 0.0,
     ) -> None:
-        # After 2 failed attempts in bearing direction, alternate left/right instead of grinding one obstacle side.
-        if attempt < 3 and last_bearing < -0.05:
-            sidestep_key = "a"
-        elif attempt < 3 and last_bearing > 0.05:
-            sidestep_key = "d"
-        else:
-            sidestep_key = "d" if attempt % 2 == 1 else "a"
+        # Commit 2 steps to one side before flipping so narrow doorways aren't oscillated in place.
+        primary = "a" if last_bearing < -0.05 else "d"
+        secondary = "d" if primary == "a" else "a"
+        sidestep_key = primary if ((attempt - 1) // 2) % 2 == 0 else secondary
         self._logger.log(
             tool="runner",
             action="on_foot_stuck_recovery",
@@ -876,12 +873,14 @@ class ActionRunner:
         prev_gray: Optional[np.ndarray] = None
         last_motion_check_t: Optional[float] = None
         low_motion_elapsed_s = 0.0
+        free_motion_elapsed_s = 0.0
         last_bearing = 0.0
         recovery_count = 0
+        stuck_anchor_bearing: Optional[float] = None
         bypass_bearing_until_t = 0.0
 
         def _on_tick(state: FrameState) -> Optional[str]:
-            nonlocal prev_gray, last_motion_check_t, low_motion_elapsed_s, last_bearing, recovery_count, bypass_bearing_until_t
+            nonlocal prev_gray, last_motion_check_t, low_motion_elapsed_s, free_motion_elapsed_s, last_bearing, recovery_count, stuck_anchor_bearing, bypass_bearing_until_t
             if state.hud is not None and norm_keywords:
                 combined_hud = f"{state.hud.subtitle_or_objective} {state.hud.help_prompt}".lower()
                 for kw in norm_keywords:
@@ -903,17 +902,25 @@ class ActionRunner:
                     motion = _road_motion_score(prev_gray, cur_gray)
                     if motion < stuck_motion_threshold:
                         low_motion_elapsed_s += dt
+                        free_motion_elapsed_s = 0.0
                     else:
                         low_motion_elapsed_s = 0.0
+                        free_motion_elapsed_s += dt
+                        if free_motion_elapsed_s >= 1.5:
+                            recovery_count = 0
+                            stuck_anchor_bearing = None
                 prev_gray = cur_gray
                 last_motion_check_t = state.elapsed_s
 
                 if low_motion_elapsed_s >= stuck_window_s and (cfg.max_duration_s - state.elapsed_s) > 0.25:
                     recovery_count += 1
+                    if recovery_count == 1 or stuck_anchor_bearing is None:
+                        stuck_anchor_bearing = last_bearing
                     off_axis = abs(last_bearing) > 0.35
                     allow_vault = (
                         vault_on_stuck
                         and (not off_axis)
+                        and (recovery_count == 1)
                         and (mm.nearest_enemy is None)
                         and (not mm.minimap_visible or mm.health_ratio >= 0.65)
                     )
@@ -922,20 +929,25 @@ class ActionRunner:
                         if off_axis
                         else 0
                     )
+                    eff_unstuck_s = (
+                        unstuck_duration_s
+                        if off_axis
+                        else min(unstuck_duration_s, 0.28 if (recovery_count % 2 == 1) else 0.42)
+                    )
                     back_up_s = 0.25
                     tick_clock_0 = self._clock()
                     self._perform_on_foot_sidestep(
                         recovery_count,
-                        last_bearing,
-                        unstuck_duration_s,
+                        last_bearing if off_axis else stuck_anchor_bearing,
+                        eff_unstuck_s,
                         allow_vault,
                         steer_dx=steer_dx,
                         back_up_s=back_up_s,
                     )
                     if not off_axis:
-                        # Hold wall-parallel heading briefly after sidestep so bearing doesn't immediately steer back into the wall.
+                        # Hold wall-parallel heading for 1.1s after sidestep to clear narrow doorways before re-steering.
                         post_sidestep_t = state.elapsed_s + max(0.0, self._clock() - tick_clock_0)
-                        bypass_bearing_until_t = post_sidestep_t + 0.75
+                        bypass_bearing_until_t = post_sidestep_t + 1.1
                     low_motion_elapsed_s = 0.0
                     prev_gray = None
                     last_motion_check_t = None

@@ -222,3 +222,39 @@ def test_follow_route_on_foot_indoor_wall_bypass_clears_doorway_to_target(tmp_pa
     assert recs[0]["details"]["back_up_s"] == 0.25
     assert world.held_keys == set()
     assert world.held_buttons == set()
+
+
+def test_follow_route_on_foot_narrow_doorway_jamb_commits_gentle_steps_without_vault(tmp_path) -> None:
+    """Cycle 5 (#299): narrow doorway jamb recovery commits 2 gentle steps (0.28s/0.42s), skips jamb vaulting, and clears opening."""
+    world = KinematicWorld(
+        player_x=0.0,
+        player_y=0.0,
+        yaw_deg=0.0,
+        health=0.95,
+        # Doorway opening x in [0.60, 2.05] (walkable slot [0.95, 1.70] with 0.35m collision pad)
+        occluders=[
+            BoxOccluder(x0=-3.0, y0=1.2, x1=0.60, y1=1.8),
+            BoxOccluder(x0=2.05, y0=1.2, x1=4.0, y1=1.8),
+        ],
+        yellow_target=(1.30, 5.2),
+    )
+    runner, _clock, _input_backend, log_path = _make_sim_runner(world, tmp_path, "narrow_jamb", initial_time=800.0)
+    res = runner.follow_route_on_foot(
+        stuck_window_s=0.5,
+        arrive_distance=0.10,
+        config=LoopConfig(max_duration_s=6.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+
+    assert res.stop_reason == "target_reached"
+    assert world.player_y > 2.2
+    logs = read_telemetry(log_path, tool="runner")
+    recs = [r for r in logs if r.get("action") == "on_foot_stuck_recovery"]
+    assert len(recs) >= 1
+    assert recs[0]["details"]["duration_s"] == 0.28
+    assert recs[0]["details"]["sidestep_key"] == "d"
+    if len(recs) >= 2:
+        assert recs[1]["details"]["sidestep_key"] == "d"
+        assert recs[1]["details"]["duration_s"] == 0.42
+        assert recs[1]["details"]["vault"] is False
+    assert world.held_keys == set()
+    assert world.held_buttons == set()
