@@ -170,6 +170,7 @@ def test_follow_route_on_foot_wall_corner_unstick_backs_up_turns_without_vault(t
         player_y=0.42,
         yaw_deg=0.0,
         health=0.95,
+        hipfire_deg_per_px=0.12,
         occluders=[BoxOccluder(x0=-4.0, y0=0.8, x1=4.0, y1=1.4)],
         yellow_target=(-1.5, -5.0),  # Behind-left (bearing ~ -0.91 -> still |bearing| > 0.35 at stuck trigger)
     )
@@ -256,5 +257,29 @@ def test_follow_route_on_foot_narrow_doorway_jamb_commits_gentle_steps_without_v
         assert recs[1]["details"]["sidestep_key"] == "d"
         assert recs[1]["details"]["duration_s"] == 0.42
         assert recs[1]["details"]["vault"] is False
+    assert world.held_keys == set()
+    assert world.held_buttons == set()
+
+
+def test_follow_route_on_foot_detects_distance_stall_during_camera_pan(tmp_path) -> None:
+    """#303: even when camera panning keeps road_motion >= threshold, zero minimap distance progress triggers unstick."""
+    world = KinematicWorld(
+        player_x=0.0,
+        player_y=0.0,
+        yaw_deg=110.0,  # Large off-axis initial camera angle so early ticks pan continuously
+        health=0.95,
+        occluders=[BoxOccluder(x0=-3.0, y0=0.45, x1=0.9, y1=1.2)],
+        yellow_target=(0.0, 5.5),
+    )
+    runner, _clock, _input_backend, log_path = _make_sim_runner(world, tmp_path, "pan_stall", initial_time=900.0)
+    res = runner.follow_route_on_foot(
+        stuck_window_s=0.9,
+        arrive_distance=0.10,
+        config=LoopConfig(max_duration_s=9.5, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+
+    assert res.stop_reason == "target_reached"
+    logs = read_telemetry(log_path, tool="runner")
+    assert any(r.get("action") == "on_foot_stuck_recovery" for r in logs)
     assert world.held_keys == set()
     assert world.held_buttons == set()

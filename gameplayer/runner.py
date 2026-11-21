@@ -874,13 +874,16 @@ class ActionRunner:
         last_motion_check_t: Optional[float] = None
         low_motion_elapsed_s = 0.0
         free_motion_elapsed_s = 0.0
+        min_target_dist: Optional[float] = None
+        target_stall_elapsed_s = 0.0
+        last_dist_check_t: Optional[float] = None
         last_bearing = 0.0
         recovery_count = 0
         stuck_anchor_bearing: Optional[float] = None
         bypass_bearing_until_t = 0.0
 
         def _on_tick(state: FrameState) -> Optional[str]:
-            nonlocal prev_gray, last_motion_check_t, low_motion_elapsed_s, free_motion_elapsed_s, last_bearing, recovery_count, stuck_anchor_bearing, bypass_bearing_until_t
+            nonlocal prev_gray, last_motion_check_t, low_motion_elapsed_s, free_motion_elapsed_s, min_target_dist, target_stall_elapsed_s, last_dist_check_t, last_bearing, recovery_count, stuck_anchor_bearing, bypass_bearing_until_t
             if state.hud is not None and norm_keywords:
                 combined_hud = f"{state.hud.subtitle_or_objective} {state.hud.help_prompt}".lower()
                 for kw in norm_keywords:
@@ -912,7 +915,21 @@ class ActionRunner:
                 prev_gray = cur_gray
                 last_motion_check_t = state.elapsed_s
 
-                if low_motion_elapsed_s >= stuck_window_s and (cfg.max_duration_s - state.elapsed_s) > 0.25:
+                if target is not None:
+                    if min_target_dist is None or target.distance < (min_target_dist - 0.015):
+                        min_target_dist = target.distance
+                        target_stall_elapsed_s = 0.0
+                    elif last_dist_check_t is not None:
+                        target_stall_elapsed_s += max(0.0, state.elapsed_s - last_dist_check_t)
+                    last_dist_check_t = state.elapsed_s
+                else:
+                    min_target_dist = None
+                    target_stall_elapsed_s = 0.0
+                    last_dist_check_t = None
+
+                dist_stall_window_s = max(stuck_window_s * 2.2, 2.2)
+                is_stuck = (low_motion_elapsed_s >= stuck_window_s) or (target_stall_elapsed_s >= dist_stall_window_s)
+                if is_stuck and (cfg.max_duration_s - state.elapsed_s) > 0.25:
                     recovery_count += 1
                     if recovery_count == 1 or stuck_anchor_bearing is None:
                         stuck_anchor_bearing = last_bearing
@@ -951,6 +968,9 @@ class ActionRunner:
                     low_motion_elapsed_s = 0.0
                     prev_gray = None
                     last_motion_check_t = None
+                    min_target_dist = None
+                    target_stall_elapsed_s = 0.0
+                    last_dist_check_t = None
                     return None
 
             if (
@@ -958,7 +978,12 @@ class ActionRunner:
                 and abs(bearing) > deadband
                 and state.elapsed_s >= bypass_bearing_until_t
             ):
-                dx = int(round(max(-240.0, min(240.0, bearing * steer_gain))))
+                eff_gain = (
+                    max(steer_gain, 240.0)
+                    if (abs(bearing) > 0.35 and target_stall_elapsed_s >= 0.4)
+                    else steer_gain
+                )
+                dx = int(round(max(-260.0, min(260.0, bearing * eff_gain))))
                 if dx != 0:
                     self._steer_camera(dx, 0)
             return None
