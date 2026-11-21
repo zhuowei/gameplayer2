@@ -4,12 +4,12 @@ Updated by `watcher` (and initialized by `toolsmith` in Phase 0).
 
 ## Current Run State
 
-- **Current Mission / Checkpoint**: Prologue — Boarded Getaway SUV (`#376`, `"Shut the fuck up and drive."`, `0` deaths in `11:13–11:32Z`)
-- **Consecutive Failures**: `0` (`cover_exposed: 0` across `11:13–11:32Z`)
-- **Minutes on Checkpoint**: `2` (`#376` boarded getaway SUV at `03:31 PST`)
-- **LLM Turns per Checkpoint**: `1`
-- **Minutes Since Last Commit**: `0` (Cycle 16 commit)
-- **Active Issues**: Checkpoint 9 (`#377`) Cycle 16: distance-gated `enter_nearest_vehicle` (`pre_dist <= 0.14` / `0.16`, `settle_s=3.8`), smooth `0.045s` mild-curve steer pulsing in `follow_gps_drive`, & Checkpoint 9 retrospective (`LESSONS_LEARNED.md`). `capture_daemon` active.
+- **Current Mission / Checkpoint**: Prologue — Getaway SUV Drive (`#376` boarded, `#382` pinned vs white car at `0.13mi`)
+- **Consecutive Failures**: `0` (`>= 6m` getaway drive stall trigger `#382`)
+- **Minutes on Checkpoint**: `18` (`#376` boarded getaway SUV at `03:31 PST`)
+- **LLM Turns per Checkpoint**: `2`
+- **Minutes Since Last Commit**: `0` (Cycle 17 commit)
+- **Active Issues**: Cycle 17 (`#382`): `follow_gps_drive` now pulses `0.25s` brake on `sharp` (`1.6s` cooldown) instead of continuous reverse-rocking, triggers `stuck_recovery` on `high_bearing_stall` (`|bearing| >= 0.30 >= 2.5s`) and `target_dist_stall` (`>= 4.0s`) even with rocking `road_motion`, and commits forward steer-around after reverse. `capture_daemon` active.
 
 ## Self-Improvement Log
 
@@ -66,4 +66,5 @@ Updated by `watcher` (and initialized by `toolsmith` in Phase 0).
 | Checkpoint 7 (Cycle 13) | Cops behind white Police SUV roadblock (`clips/check_1026.mp4`) missed by full Vision ROI while blind `2`-burst probes wasted rifle ammo (`3/70` `red_reticle`) & `0.55s` flanks reset across calls (`#358`, `#359`). | `01ed49f`: Add hood-height Vision ROI `(0.22, 0.25, 0.88, 0.58)`, `1`-burst blind probe (`no_lock_ticks == 8`) + skip `hold_engage_threat` extension at `0` red hits, `0.85s` lateral SUV flank + `self._last_flank_streak` persistence, & append Checkpoint 7 retrospective. | `@verifier-3` PASS (`#364`, `126 passed`); roadblock cleared & reached getaway SUV (`#361`). |
 | Checkpoint 7 (Cycle 14) | Calling `cover_peek_combat(enter_cover=True)` after `advance_under_fire(low_health tap_cover=True)` blindly toggled `'q'` OUT of cover (`#366`, `#367`). | `508bfb9`: Replace blind `'q'` tap in `cover_peek_combat(enter_cover=True)` with idempotent `self.enter_cover(force=False)` and guard `cover_duck` entry against exposed standing posture (`head_top_y < 0.45`). | `@verifier-3` PASS (`#370`, `127 passed`); merged & pushed to `main`. |
 | Checkpoint 8 (Cycle 15) | Blind `w 0.8s + f` overshot getaway SUV (`#363`) and `advance_flank_unblock` locked 4 streaks onto one blocked side (`#372`). | `90629bd`: Switch `advance_flank_unblock` polarity after `2` blocked attempts (`// 2`, initial side away from `enemy.bearing`), add `enter_nearest_vehicle()` boarding verifier (`TOOLS.md`), & append Checkpoint 8 retrospective (`LESSONS_LEARNED.md`). | `@verifier-3` PASS (`#374`, `128 passed`); roadblock cleared & getaway SUV boarded (`#376`). |
-| Checkpoint 9 (Cycle 16) | `enter_nearest_vehicle` false-confirmed at `pre_dist=0.373` (`shift_score >= 12`) and missed `pre_dist=0.058` under `settle_s=2.5`, plus binary driving steer risk (`#377`). | Cycle 16: Gate `shift_score` (`<= max(arrive_distance * 2.5, 0.16)`) & `cur_has_drive` (`<= 0.14`) in `enter_nearest_vehicle(settle_s=3.8)`, add smooth `0.045s` mild-curve steer pulsing (`0.08..0.24`) in `follow_gps_drive()`, & append Checkpoint 9 retrospective. | Pending `@verifier-3` QA. |
+| Checkpoint 9 (Cycle 16) | `enter_nearest_vehicle` false-confirmed at `pre_dist=0.373` (`shift_score >= 12`) and missed `pre_dist=0.058` under `settle_s=2.5`, plus binary driving steer risk (`#377`). | `b92fb64`: Gate `shift_score` (`<= max(arrive_distance * 2.5, 0.16)`) & `cur_has_drive` (`<= 0.14`) in `enter_nearest_vehicle(settle_s=3.8)`, add smooth `0.045s` mild-curve steer pulsing (`0.08..0.24`) in `follow_gps_drive()`, & append Checkpoint 9 retrospective. | `@verifier-3` PASS (`#380`, `129 passed`); merged & pushed to `main`. |
+| Checkpoint 9 (Cycle 17) | Getaway SUV pinned against white civilian car at `0.13mi` (`clips/check_1145.mp4`, `#382`) logged `0` `stuck_recovery`s because `not sharp` disabled stuck checks, continuous `'s'` rocked car (`road_motion >= 20`), & unstick lacked forward steer-around. | Cycle 17: Replace continuous `'s'` on `sharp` with `0.25s` brake pulse (`1.6s` cooldown), keep stuck detection active during `sharp`, trigger `stuck_recovery` on `high_bearing_stall` (`|bearing| >= 0.30`) & `target_dist_stall` (`>= 4.0s`), and steer forward around obstacle after reverse. | Pending `@verifier-3` QA. |

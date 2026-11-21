@@ -1092,3 +1092,70 @@ def test_enter_nearest_vehicle_distance_gate_settle_38_and_follow_gps_drive_mild
     assert backend_drv.events.count(("key_up", "d")) >= 3
     assert backend_drv.events.count(("key_down", "w")) == 1
     assert backend_drv.currently_held_keys == set()
+
+
+def test_follow_gps_drive_recovers_from_rocking_high_bearing_stall_and_target_dist_stall(tmp_path) -> None:
+    """Re #382: rocking against a car with high road_motion triggers stuck_recovery on high_bearing_stall & target_dist_stall."""
+    # 1) check_1145 scenario: high visual rocking (road_motion >> 3) + sustained sharp yellow route (+0.498 -> +0.374 -> +0.498).
+    def _rocking_sharp_frame(idx: int) -> Image.Image:
+        pts = [(0.55, 0.76), (0.95, 0.78)] if (idx % 2 == 0) else [(0.55, 0.72), (0.95, 0.54)]
+        img = make_synthetic_minimap_frame(health_ratio=0.90, route_yellow_rel=pts)
+        shade = 220 if (idx % 2 == 0) else 35
+        ImageDraw.Draw(img).rectangle((300, 150, 900, 450), fill=(shade, shade, shade))
+        return img
+
+    clock1 = FakeClock()
+    backend1 = RecordingInputBackend()
+    log1 = tmp_path / "rock_sharp.jsonl"
+    ctrl1 = InputController(backend1, TelemetryLogger(log1), clock=clock1, sleep_fn=clock1.sleep, register_signals=False)
+    runner1 = ActionRunner(
+        ctrl1,
+        ReplayWindowBackend(_rocking_sharp_frame),
+        ScriptedHudOCR(lambda _i: {}),
+        TelemetryLogger(log1),
+        clock=clock1,
+        sleep_fn=clock1.sleep,
+    )
+    runner1.follow_gps_drive(
+        stuck_window_s=1.0,
+        reverse_duration_s=0.4,
+        config=LoopConfig(max_duration_s=4.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    logs1 = read_telemetry(log1, tool="runner")
+    stucks1 = [r for r in logs1 if r.get("action") == "stuck_recovery"]
+    assert len(stucks1) >= 1
+    assert stucks1[0]["details"]["reason"] == "high_bearing_stall"
+    # Verify forward steer-around ('w' + 'd') occurred after reverse release
+    s_up_idx = next(i for i, ev in enumerate(backend1.events) if ev == ("key_up", "s"))
+    assert ("key_down", "w") in backend1.events[s_up_idx + 1 :]
+    assert backend1.currently_held_keys == set()
+
+    # 2) Head-on wheelspin stall: bearing=0.0, single distant yellow target unchanged for >= 4.0s despite high road_motion.
+    def _headon_spin_frame(idx: int) -> Image.Image:
+        img = make_synthetic_minimap_frame(health_ratio=0.90, yellow_points=[(0.50, 0.35)])  # dist=0.545 > 0.18
+        shade = 210 if (idx % 2 == 0) else 40
+        ImageDraw.Draw(img).rectangle((300, 150, 900, 450), fill=(shade, shade, shade))
+        return img
+
+    clock2 = FakeClock()
+    backend2 = RecordingInputBackend()
+    log2 = tmp_path / "headon_spin.jsonl"
+    ctrl2 = InputController(backend2, TelemetryLogger(log2), clock=clock2, sleep_fn=clock2.sleep, register_signals=False)
+    runner2 = ActionRunner(
+        ctrl2,
+        ReplayWindowBackend(_headon_spin_frame),
+        ScriptedHudOCR(lambda _i: {}),
+        TelemetryLogger(log2),
+        clock=clock2,
+        sleep_fn=clock2.sleep,
+    )
+    runner2.follow_gps_drive(
+        stuck_window_s=1.0,
+        reverse_duration_s=0.4,
+        config=LoopConfig(max_duration_s=5.5, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    logs2 = read_telemetry(log2, tool="runner")
+    stucks2 = [r for r in logs2 if r.get("action") == "stuck_recovery"]
+    assert len(stucks2) >= 1
+    assert stucks2[0]["details"]["reason"] == "target_dist_stall"
+    assert backend2.currently_held_keys == set()
