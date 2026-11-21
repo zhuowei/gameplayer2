@@ -194,3 +194,14 @@ Escalating deep perception and control failures to `Carbon` specialists produced
   2. **`enter_nearest_vehicle` far-distance false confirmation (`pre_dist=0.373` at `11:27:30`) & short `settle_s=2.5` (`11:28:45`)**: Ungated `shift_score >= 12.0` / `cur_has_drive` confirmed boarding far from the SUV, while `2.5s` cut off the door-walk animation at `pre_dist=0.058`.
   3. **Binary full-tick driving steer (`runner.py:2365-2368`)**: Holding `'a'`/`'d'` across full `100ms` ticks on mild `0.08..0.24` curves risks high-speed fishtailing/weaving.
 - **Cycle 16 Fixes**: Gated `enter_nearest_vehicle` `shift_score >= 12.0` on `pre_target is None or pre_target.distance <= max(arrive_distance * 2.5, 0.16)` and `cur_has_drive`/route on `pre_target.distance <= 0.14`, raised default `settle_s=3.8`, and added smooth `0.045s` mild-curve steer pulsing (`steer_deadband <= |bearing| < 0.24`) in `follow_gps_drive`.
+
+---
+
+## 14. Checkpoint 10 (2026-11-21 04:04 PST / 12:04Z)
+
+- **What went right (`b92fb64`, `3cd2628`, `#387`)**:
+  - Sustained Prologue getaway driving across `14` `follow_gps_drive` runs (~`540s` drive time), reaching within **`0.13–0.14mi`** of the helicopter objective (`p5_drive_5.png`, `clips/check_1145.mp4`).
+  - Rapid visual-telemetry-fix loop: Cycle 16 (`b92fb64`, `129 passed`) shipped `0.045s` mild-curve steer pulsing + distance-gated `enter_nearest_vehicle`; `watcher-3` isolated bumper-rocking wheelspin masking `_road_motion_score` (`#382`, `0` recoveries across `2x45s`); and Cycle 17 (`3cd2628`, `130 passed`) landed & pushed `sharp` brake pulsing, `high_bearing_stall`, `target_dist_stall`, and forward steer-around recovery.
+- **What did not work (`#378`, `#382`, `#383`, `#387`)**:
+  - Two driving `MISSION_FAILED` resets (`11:37:39` `"The car was stuck in the snow."` at `0.14mi` `#378`, `11:54:35` `"The route was abandoned."` `#383`) plus an `18m` getaway-drive grind before `3cd2628` merged (`04:03:31`), because wheelspin/rocking against roadside snowbanks & civilian cars kept `_road_motion_score >= 3.0`, `not sharp` disabled `stuck_recovery` whenever `|bearing| >= 0.45`, and continuous `'s'` during sharp turns caused reverse-rocking.
+- **Cycle 17 Fixes (Verified `3cd2628`, `#385`)**: Replaced continuous `'s'` during `sharp` turns with a `0.25s` brake pulse (`1.6s` cooldown), kept `enable_stuck_recovery` active across `sharp` turns, triggered `stuck_recovery` on sustained `high_bearing_stall` (`|bearing| >= 0.30 >= 2.5s`) and `target_dist_stall` (`>= 4.0s`), and committed a `<= 0.45s` forward steer-around pulse after reverse.

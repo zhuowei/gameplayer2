@@ -4,12 +4,12 @@ Updated by `watcher` (and initialized by `toolsmith` in Phase 0).
 
 ## Current Run State
 
-- **Current Mission / Checkpoint**: Prologue — Getaway SUV Drive (`#376` boarded, `#382` pinned vs white car at `0.13mi`)
-- **Consecutive Failures**: `0` (`>= 6m` getaway drive stall trigger `#382`)
-- **Minutes on Checkpoint**: `18` (`#376` boarded getaway SUV at `03:31 PST`)
-- **LLM Turns per Checkpoint**: `2`
-- **Minutes Since Last Commit**: `0` (Cycle 17 commit)
-- **Active Issues**: Cycle 17 (`#382`): `follow_gps_drive` now pulses `0.25s` brake on `sharp` (`1.6s` cooldown) instead of continuous reverse-rocking, triggers `stuck_recovery` on `high_bearing_stall` (`|bearing| >= 0.30 >= 2.5s`) and `target_dist_stall` (`>= 4.0s`) even with rocking `road_motion`, and commits forward steer-around after reverse. `capture_daemon` active.
+- **Current Mission / Checkpoint**: Prologue — Getaway SUV Drive (`3cd2628` live, retrying cleanly on road at `0.58mi` `#383`)
+- **Consecutive Failures**: `0` post-`3cd2628` (`2` prior driving resets `#378`, `#383`)
+- **Minutes on Checkpoint**: `32` (`#387` Checkpoint 10 Retrospective at `04:04 PST`)
+- **LLM Turns per Checkpoint**: `3`
+- **Minutes Since Last Commit**: `0` (Cycle 18 / Checkpoint 10 docs)
+- **Active Issues**: Checkpoint 10 (`#387`) Cycle 18: documented `11:32Z–12:04Z` retrospective in `LESSONS_LEARNED.md` & `STATUS.md` (`3cd2628` Cycle 17 live on road; holding driving edits until `player-5` tests `3cd2628`). `capture_daemon` active.
 
 ## Self-Improvement Log
 
@@ -67,4 +67,5 @@ Updated by `watcher` (and initialized by `toolsmith` in Phase 0).
 | Checkpoint 7 (Cycle 14) | Calling `cover_peek_combat(enter_cover=True)` after `advance_under_fire(low_health tap_cover=True)` blindly toggled `'q'` OUT of cover (`#366`, `#367`). | `508bfb9`: Replace blind `'q'` tap in `cover_peek_combat(enter_cover=True)` with idempotent `self.enter_cover(force=False)` and guard `cover_duck` entry against exposed standing posture (`head_top_y < 0.45`). | `@verifier-3` PASS (`#370`, `127 passed`); merged & pushed to `main`. |
 | Checkpoint 8 (Cycle 15) | Blind `w 0.8s + f` overshot getaway SUV (`#363`) and `advance_flank_unblock` locked 4 streaks onto one blocked side (`#372`). | `90629bd`: Switch `advance_flank_unblock` polarity after `2` blocked attempts (`// 2`, initial side away from `enemy.bearing`), add `enter_nearest_vehicle()` boarding verifier (`TOOLS.md`), & append Checkpoint 8 retrospective (`LESSONS_LEARNED.md`). | `@verifier-3` PASS (`#374`, `128 passed`); roadblock cleared & getaway SUV boarded (`#376`). |
 | Checkpoint 9 (Cycle 16) | `enter_nearest_vehicle` false-confirmed at `pre_dist=0.373` (`shift_score >= 12`) and missed `pre_dist=0.058` under `settle_s=2.5`, plus binary driving steer risk (`#377`). | `b92fb64`: Gate `shift_score` (`<= max(arrive_distance * 2.5, 0.16)`) & `cur_has_drive` (`<= 0.14`) in `enter_nearest_vehicle(settle_s=3.8)`, add smooth `0.045s` mild-curve steer pulsing (`0.08..0.24`) in `follow_gps_drive()`, & append Checkpoint 9 retrospective. | `@verifier-3` PASS (`#380`, `129 passed`); merged & pushed to `main`. |
-| Checkpoint 9 (Cycle 17) | Getaway SUV pinned against white civilian car at `0.13mi` (`clips/check_1145.mp4`, `#382`) logged `0` `stuck_recovery`s because `not sharp` disabled stuck checks, continuous `'s'` rocked car (`road_motion >= 20`), & unstick lacked forward steer-around. | Cycle 17: Replace continuous `'s'` on `sharp` with `0.25s` brake pulse (`1.6s` cooldown), keep stuck detection active during `sharp`, trigger `stuck_recovery` on `high_bearing_stall` (`|bearing| >= 0.30`) & `target_dist_stall` (`>= 4.0s`), and steer forward around obstacle after reverse. | Pending `@verifier-3` QA. |
+| Checkpoint 9 (Cycle 17) | Getaway SUV pinned against white civilian car at `0.13mi` (`clips/check_1145.mp4`, `#382`) logged `0` `stuck_recovery`s because `not sharp` disabled stuck checks, continuous `'s'` rocked car (`road_motion >= 20`), & unstick lacked forward steer-around. | `3cd2628`: Replace continuous `'s'` on `sharp` with `0.25s` brake pulse (`1.6s` cooldown), keep stuck detection active during `sharp`, trigger `stuck_recovery` on `high_bearing_stall` (`|bearing| >= 0.30`) & `target_dist_stall` (`>= 4.0s`), and steer forward around obstacle after reverse. | `@verifier-3` PASS (`#385`, `130 passed`); merged & pushed to `main`. |
+| Checkpoint 10 (Cycle 18) | `11:32Z–12:04Z` Checkpoint 10 retrospective (`14` drive runs ~`540s`, `0.13–0.14mi` chopper, `#378`/`#383` resets `#387`). | Append Checkpoint 10 (`2026-11-21 04:04 PST / 12:04Z`) to `LESSONS_LEARNED.md` & refresh `STATUS.md`. | Pending `@verifier-3` QA. |
