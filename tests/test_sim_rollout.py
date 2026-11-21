@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+from PIL import Image, ImageDraw
+
+from gameplayer.hud import OcrLine
 from gameplayer.input import InputController
+from gameplayer.perception import classify_posture
+from gameplayer.playbooks import prologue_shutter_cover
 from gameplayer.runner import ActionRunner, LoopConfig
 from gameplayer.telemetry import TelemetryLogger, read_telemetry
 from tests.sim_harness import (
@@ -11,7 +16,8 @@ from tests.sim_harness import (
     SimInputBackend,
     SimWindowBackend,
 )
-from tests.test_runner import ScriptedHudOCR
+from tests.test_minimap import make_synthetic_minimap_frame
+from tests.test_runner import FakeClock, RecordingInputBackend, ReplayWindowBackend, ScriptedHudOCR
 
 
 def _make_sim_runner(world: KinematicWorld, tmp_path, name: str, initial_time: float = 500.0):
@@ -281,5 +287,149 @@ def test_follow_route_on_foot_detects_distance_stall_during_camera_pan(tmp_path)
     assert res.stop_reason == "target_reached"
     logs = read_telemetry(log_path, tool="runner")
     assert any(r.get("action") == "on_foot_stuck_recovery" for r in logs)
+    assert world.held_keys == set()
+    assert world.held_buttons == set()
+
+
+def test_enter_cover_idempotent_on_chest_high_shift_score_and_posture(tmp_path) -> None:
+    """Cycle 7 (#311): chest-high cover band classifies `in_cover`, and shift_score >= 10 latches idempotency."""
+    chest_img = Image.new("RGB", (640, 360), (90, 96, 108))
+    draw = ImageDraw.Draw(chest_img)
+    # Uniform open upper half, vertical chest-high counter seam in lower rows [0.49..0.90]
+    for x in range(int(0.18 * 640), int(0.36 * 640), 10):
+        draw.rectangle((x, 176, x + 5, 324), fill=(52, 54, 58))
+        draw.rectangle((x + 5, 176, x + 10, 324), fill=(78, 80, 84))
+    assert classify_posture(chest_img).state == "in_cover"
+
+    # Low-contrast standing frame before cover, then high-shift chest-high frame after pressing `q`.
+    f0 = make_synthetic_minimap_frame(health_ratio=0.90)
+    d0 = ImageDraw.Draw(f0)
+    d0.rectangle((220, 140, 420, 260), fill=(35, 35, 42))
+    f1 = make_synthetic_minimap_frame(health_ratio=0.90)
+    d1 = ImageDraw.Draw(f1)
+    d1.rectangle((220, 140, 420, 260), fill=(215, 215, 220))
+    # Add slightly textured non-blank scene so before/after classify standing (<0.85 conf) but shift_score >= 10.
+    for x in range(120, 500, 40):
+        d0.rectangle((x, 40, x + 16, 120), fill=(48, 52, 60))
+        d1.rectangle((x, 40, x + 16, 120), fill=(48, 52, 60))
+
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    log_path = tmp_path / "cover_idemp.jsonl"
+    logger = TelemetryLogger(log_path)
+    ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
+    frames = [f0, f1, f1, f1]
+    idx_box = {"i": 0}
+
+    def _next_frame(idx: int) -> Image.Image:
+        i = idx_box["i"]
+        idx_box["i"] += 1
+        return frames[min(i, len(frames) - 1)]
+
+    runner = ActionRunner(ctrl, ReplayWindowBackend(_next_frame), ScriptedHudOCR(lambda _i: {}), logger, clock, clock.sleep)
+    runner.enter_cover()
+    assert runner._in_cover_hint is True
+    q_count_first = sum(1 for ev in backend.events if ev == ("key_down", "q"))
+    assert q_count_first == 1
+
+    # Second call must NOT toggle `q` back out of cover
+    runner.enter_cover()
+    q_count_second = sum(1 for ev in backend.events if ev == ("key_down", "q"))
+    assert q_count_second == 1
+    assert any(r.get("action") == "enter_cover_noop" for r in read_telemetry(log_path, tool="runner"))
+
+
+def test_calibrate_controls_vertical_pitch_down_sign_normal_and_inverted(tmp_path) -> None:
+    """Cycle 7 (#311): calibrate_controls probes vertical dy and recovers pitch_down_sign (+1 vs -1)."""
+    world_norm = KinematicWorld(player_x=0.0, player_y=0.0, health=0.95, invert_pitch=False)
+    runner_norm, _, _, _ = _make_sim_runner(world_norm, tmp_path, "cal_norm", initial_time=1000.0)
+    rep_norm = runner_norm.calibrate_controls(probe_dx=20, save_path=None)
+    assert rep_norm["pitch_down_sign"] == 1
+    assert float(rep_norm["pitch_px_per_dy"]) > 0.0
+    assert world_norm.held_keys == set()
+
+    world_inv = KinematicWorld(player_x=0.0, player_y=0.0, health=0.95, invert_pitch=True)
+    runner_inv, _, _, _ = _make_sim_runner(world_inv, tmp_path, "cal_inv", initial_time=1050.0)
+    rep_inv = runner_inv.calibrate_controls(probe_dx=20, save_path=None)
+    assert rep_inv["pitch_down_sign"] == -1
+    assert float(rep_inv["pitch_px_per_dy"]) > 0.0
+    assert world_inv.held_keys == set()
+
+
+def test_level_camera_pitch_rescues_ceiling_lock_both_signs_and_preserves_horizon(tmp_path) -> None:
+    """Cycle 7: level_camera_pitch rescues -60 deg ceiling lock for normal & inverted Y, keeps horizon net 0."""
+    for inv in (False, True):
+        w_ceil = KinematicWorld(player_x=0.0, player_y=0.0, pitch_deg=-60.0, invert_pitch=inv)
+        r_ceil, _, _, _ = _make_sim_runner(w_ceil, tmp_path, f"ceil_{inv}", initial_time=1100.0)
+        rep = r_ceil.level_camera_pitch(probe_dy=14, recovery_dy=150, max_passes=2)
+        assert rep["status"] == "recovered_ceiling_clamp"
+        assert w_ceil.pitch_deg > -35.0
+        assert rep["pitch_down_sign"] == (-1 if inv else 1)
+
+    w_hor = KinematicWorld(player_x=0.0, player_y=0.0, pitch_deg=0.0, invert_pitch=True)
+    r_hor, _, _, _ = _make_sim_runner(w_hor, tmp_path, "hor_ok", initial_time=1150.0)
+    rep_hor = r_hor.level_camera_pitch()
+    assert rep_hor["status"] == "horizon_ok"
+    assert abs(w_hor.pitch_deg) <= 1.0
+
+    w_drop = KinematicWorld(player_x=0.0, player_y=0.0, pitch_deg=-60.0, drop_mouse_deltas=True)
+    r_drop, _, _, _ = _make_sim_runner(w_drop, tmp_path, "drop_pitch", initial_time=1200.0)
+    rep_drop = r_drop.level_camera_pitch()
+    assert rep_drop["status"] == "unresponsive"
+
+
+def test_follow_route_on_foot_pivots_close_target_and_stops_on_get_in_cover(tmp_path) -> None:
+    """Cycle 7: close-range large-bearing target pivots cleanly instead of orbiting; 'get in cover' stops near blip."""
+    world = KinematicWorld(
+        player_x=0.0,
+        player_y=0.0,
+        yaw_deg=135.0,  # Off-axis close target (3.0m -> dist=0.086) that used to orbit endlessly
+        health=0.95,
+        yellow_target=(0.0, 3.0),
+    )
+    runner, _, _, _ = _make_sim_runner(world, tmp_path, "close_pivot", initial_time=1250.0)
+    res = runner.follow_route_on_foot(
+        arrive_distance=0.055,
+        config=LoopConfig(max_duration_s=4.5, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert res.stop_reason == "target_reached"
+    assert world.held_keys == set()
+
+    # Subtitle "get in cover" stops automatically when already near the cover blip
+    clock2 = FakeClock()
+    backend2 = RecordingInputBackend()
+    logger2 = TelemetryLogger(tmp_path / "cover_sub.jsonl")
+    ctrl2 = InputController(backend=backend2, logger=logger2, clock=clock2, sleep_fn=clock2.sleep, register_signals=False)
+    near_frame = make_synthetic_minimap_frame(yellow_points=[(0.55, 0.70)])
+    ocr2 = ScriptedHudOCR(
+        lambda _idx: {"bottom_subtitle": [OcrLine("T, get in cover. B, set the charge.", 0.95, (0.2, 0.8, 0.6, 0.1))]}
+    )
+    runner2 = ActionRunner(ctrl2, ReplayWindowBackend(lambda _i: near_frame), ocr2, logger2, clock2, clock2.sleep)
+    res2 = runner2.follow_route_on_foot(config=LoopConfig(max_duration_s=3.0, hz=10.0, hud_check_interval_s=0.0))
+    assert res2.stop_reason == "subtitle_keyword:get in cover"
+    assert backend2.currently_held_keys == set()
+
+
+def test_approach_and_enter_cover_shutter_room_with_ceiling_lock_and_pillar(tmp_path) -> None:
+    """Cycle 7 (#308/#311): full closed-loop Shutter Room recovery levels ceiling pitch, rounds pillar, and snaps cover."""
+    world = KinematicWorld(
+        player_x=0.0,
+        player_y=0.0,
+        yaw_deg=85.0,
+        pitch_deg=-60.0,
+        invert_pitch=True,
+        health=0.95,
+        occluders=[BoxOccluder(x0=-1.4, y0=1.1, x1=0.8, y1=1.8)],
+        yellow_target=(0.3, 4.2),
+        cover_snap_radius_m=3.1,
+        clear_yellow_on_cover_snap=True,
+    )
+    runner, _, _, _ = _make_sim_runner(world, tmp_path, "shutter_cover", initial_time=1300.0)
+    pb = prologue_shutter_cover(runner, arrive_distance=0.085, max_duration_s=18.0)
+
+    assert pb.outcome == "cover_entered"
+    assert world.in_cover is True
+    assert world.yellow_target is None
+    assert world.pitch_deg > -35.0
     assert world.held_keys == set()
     assert world.held_buttons == set()

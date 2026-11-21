@@ -4,12 +4,12 @@ Updated by `watcher` (and initialized by `toolsmith` in Phase 0).
 
 ## Current Run State
 
-- **Current Mission / Checkpoint**: Prologue — Vault Exit / Shutter Corridor (`$177,000` collected, hostage guard cleared `#298`, active `player-4` session)
-- **Consecutive Failures**: `0` since hostage clear (`2` timing fails at `#296`–`#297` resolved; `49` historical `banner:MISSION_FAILED` total)
-- **Minutes on Checkpoint**: `3` (doorway exit after `#298`)
-- **LLM Turns per Checkpoint**: `3`
-- **Minutes Since Last Commit**: `0` (Cycle 5 commit)
-- **Active Issues**: Live scoreboard snapshots written to gitignored `logs/status.json` (`gameplayer.status_store`); Cycle 5 fixes narrow doorway-jamb `d/a` ping-pong (`captures/retro2_check.png`). `capture_daemon` pid `1844` active.
+- **Current Mission / Checkpoint**: Prologue — Shutter Room Cover (`$177,000` collected, active `player-5` session)
+- **Consecutive Failures**: `0` deaths on current checkpoint (`23m` Shutter Room stall `#308`/`#310`/`#311` addressed by Cycle 7)
+- **Minutes on Checkpoint**: `23` (`08:09–08:32Z` Shutter Room)
+- **LLM Turns per Checkpoint**: `12+`
+- **Minutes Since Last Commit**: `0` (Cycle 7 commit)
+- **Active Issues**: Live scoreboard snapshots written to gitignored `logs/status.json` (`gameplayer.status_store`); Cycle 7 adds `pitch_down_sign` vertical calibration, `level_camera_pitch()`, chest-high `enter_cover()` idempotency, close-range pivot, and `approach_and_enter_cover()`. `capture_daemon` active.
 
 ## Self-Improvement Log
 
@@ -54,4 +54,6 @@ Updated by `watcher` (and initialized by `toolsmith` in Phase 0).
 | Checkpoint 1 (Cycle 2) | `q` toggle lacked visual posture check (`#230`/`#262`), inline scripts were brittle, `STATUS.md` dirtied `main`, & native `0x20000000` `CGEventGetFlags` bits were stripped (`#278`). | `f87c9a2`: Preserved non-modifier `CGEventGetFlags` bits, added `classify_posture` + idempotent `enter_cover()`/`exit_cover(min_health=0.42)`, `calibrate_controls()`, `replay_bench.py`, `playbooks.py`, & `status_store.py` (`logs/status.json`). | `@verifier-3` PASS (`#281`, `107 passed`); merged & pushed (`#282`); unblocked Prologue phone (`#283`) & `57–60%` clip visual lock rate. |
 | Checkpoint 1 (Cycle 3) | `follow_route_on_foot` ground nose-first into indoor bank wall with `bearing=-0.639` (`8x` timeouts, `#283`) repeating `a`/`d`+`space` vaults instead of backing off & turning toward off-axis route. | `176774f`, `6982ad6`: On `abs(last_bearing) > 0.35` stuck recovery, `follow_route_on_foot` disables `vault`, backs up `"s"` (`0.25s`), lowers `stuck_window_s=0.9`, and steers aggressively toward `last_bearing`. | `@verifier-3` PASS (`#285`, `#289`, `108 passed`); merged & pushed. |
 | Checkpoint 2 (Cycle 4) | Vault hallway navigation re-steered straight into walls behind the yellow objective dot (`p4_vault_in9.png`, `#291`). | `faed7a6`: Added Bug-algorithm `bypass_bearing_until_t` (`0.75s` post-sidestep) + immediate `0.25s` `"s"` back-off on all `follow_route_on_foot` stuck recoveries. | `@verifier-3` PASS (`#294`, `109 passed`); vault cash `$177,000` & hostage guard cleared (`#292`, `#298`). |
-| Checkpoint 2 (Cycle 5) | Left steel vault doorway jamb pinned `follow_route_on_foot` across `11` `d/a` ping-pong hops + `vault=True` (`captures/retro2_check.png`, `#299`). | Cycle 5: Commit `2` gentle lateral steps per side (`0.28s`, `0.42s`) via `((attempt - 1) // 2) % 2`, skip `vault` on `recovery_count >= 2`, extend `bypass_bearing_until_t` to `1.1s`, and update `LESSONS_LEARNED.md` & `STATUS.md`. | Pending `@verifier-3` QA. |
+| Checkpoint 2 (Cycle 5) | Left steel vault doorway jamb pinned `follow_route_on_foot` across `11` `d/a` ping-pong hops + `vault=True` (`captures/retro2_check.png`, `#299`). | `177a76c`: Commit `2` gentle lateral steps per side (`0.28s`, `0.42s`) via `((attempt - 1) // 2) % 2`, skip `vault` on `recovery_count >= 2`, extend `bypass_bearing_until_t` to `1.1s`, and update `LESSONS_LEARNED.md` & `STATUS.md`. | `@verifier-3` PASS (`#301`, `110 passed`); merged & pushed (`#302`). |
+| Checkpoint 3 (Cycle 6) | Shutter Room pillar stall kept `_road_motion_score >= 2.5` while `follow_route_on_foot` panned `dx=101..20` (`#303`). | `1e6fc22`: Added minimap `min_target_dist` / `target_stall_elapsed_s` stall trigger (`>= 2.2s`) and boosted off-axis steer gain (`max(steer_gain, 240.0)`). | `@verifier-3` PASS (`#306`, `111 passed`); merged & pushed (`#307`). |
+| Checkpoint 3 (Cycle 7) | Shutter Room `23m` stall (`#308`/`#310`/`#311`): `+dy` pitched UP into ceiling (`pitch_down_sign=-1`), `enter_cover()` untoggled chest-high cover (`shift_score=19.1`), close-range orbiting. | Cycle 7: Vertical `pitch_down_sign` in `calibrate_controls()`, sign-agnostic `level_camera_pitch()`, chest-high `classify_posture` (`rows 88..162`) + `shift_score >= 10` `enter_cover()` idempotency, close-range pivot + `"get in cover"` stop, and `approach_and_enter_cover()` / `prologue_shutter_cover()`. | Pending `@verifier-3` QA. |

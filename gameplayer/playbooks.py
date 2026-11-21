@@ -160,3 +160,34 @@ def open_phone_menu(
     runner._tap_key_preserving_held("up", hold_s=up_hold_s)
     if settle_s > 0:
         runner._sleep(settle_s)
+
+
+def prologue_shutter_cover(
+    runner: ActionRunner,
+    *,
+    arrive_distance: float = 0.085,
+    max_duration_s: float = 22.0,
+    level_pitch: bool = True,
+) -> PlaybookResult:
+    """Level extreme pitch if needed, walk to yellow cover blip, and snap into cover (`q`) until confirmed."""
+    res = runner.approach_and_enter_cover(
+        target_color="yellow",
+        arrive_distance=arrive_distance,
+        max_duration_s=max_duration_s,
+        level_pitch=level_pitch,
+    )
+    steps = [
+        {
+            "step": "approach_and_enter_cover",
+            "stop_reason": res.stop_reason,
+            "elapsed_s": round(res.elapsed_s, 2),
+            "ticks": res.ticks,
+        }
+    ]
+    return PlaybookResult(
+        playbook="prologue_shutter_cover",
+        outcome=res.stop_reason,
+        steps=steps,
+        last_minimap=res.last_minimap,
+        last_hud=res.last_hud,
+    )

@@ -477,12 +477,13 @@ def classify_posture(
     if float(np.std(gray)) < 4.0:
         return PostureStatus(state="unknown", confidence=0.0)
 
-    def _zone_metrics(x0_rel: float, x1_rel: float) -> tuple[float, float, float]:
+    def _zone_metrics(x0_rel: float, x1_rel: float, y0_px: int = 27, y1_px: int = 153) -> tuple[float, float, float]:
         x0 = max(0, int(round(x0_rel * 320)))
         x1 = min(320, int(round(x1_rel * 320)))
-        patch = gray[27:153, x0:x1]
-        up = gray[27:76, x0:x1]
-        lo = gray[99:153, x0:x1]
+        patch = gray[y0_px:y1_px, x0:x1]
+        band_span = max(8, (y1_px - y0_px) // 3)
+        up = gray[y0_px : y0_px + band_span, x0:x1]
+        lo = gray[y1_px - band_span : y1_px, x0:x1]
         cont = abs(float(np.mean(up)) - float(np.mean(lo)))
         gx = float(np.mean(np.abs(np.diff(patch, axis=1))))
         gy = float(np.mean(np.abs(np.diff(patch, axis=0))))
@@ -504,9 +505,16 @@ def classify_posture(
 
     left_wall = l_ratio >= 1.15 and l_cont <= 14.0
     right_wall = r_ratio >= 1.15 and r_cont <= 14.0
-    if left_wall or right_wall:
-        wall_side = "left" if (left_wall and (not right_wall or l_ratio >= r_ratio)) else "right"
-        peak_ratio = max(l_ratio if left_wall else 0.0, r_ratio if right_wall else 0.0)
+    # Lower chest-high cover band (rows 88..162 of 180) for crouched/counter cover.
+    cl_ratio, cl_cont, _ = _zone_metrics(0.18, 0.36, y0_px=88, y1_px=162)
+    cr_ratio, cr_cont, _ = _zone_metrics(0.48, 0.66, y0_px=88, y1_px=162)
+    chest_left_wall = cl_ratio >= 1.18 and cl_cont <= 12.0
+    chest_right_wall = cr_ratio >= 1.18 and cr_cont <= 12.0
+    if left_wall or right_wall or chest_left_wall or chest_right_wall:
+        eff_l = max(l_ratio if left_wall else 0.0, cl_ratio if chest_left_wall else 0.0)
+        eff_r = max(r_ratio if right_wall else 0.0, cr_ratio if chest_right_wall else 0.0)
+        wall_side = "left" if eff_l >= eff_r else "right"
+        peak_ratio = max(eff_l, eff_r)
         conf = _clamp(0.62 + 0.25 * min(1.0, (peak_ratio - 1.15) / 0.25), 0.0, 0.95)
         return PostureStatus(
             state="in_cover",
@@ -527,8 +535,8 @@ def classify_posture(
             head_top_y=head_top_y,
         )
 
-    if l_ratio < 1.04 and r_ratio < 1.04:
-        margin = max(0.0, 1.04 - max(l_ratio, r_ratio))
+    if l_ratio < 0.96 and r_ratio < 0.96:
+        margin = max(0.0, 0.96 - max(l_ratio, r_ratio))
         conf = _clamp(0.62 + 0.25 * min(1.0, margin / 0.20), 0.0, 0.92)
         return PostureStatus(
             state="standing",

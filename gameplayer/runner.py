@@ -293,6 +293,7 @@ class ActionRunner:
         self._enable_camera_motion_tracking = enable_camera_motion_tracking
         self._silhouette_fallback = SilhouetteHumanDetectorBackend()
         self._in_cover_hint: Optional[bool] = None
+        self._pitch_down_sign: Optional[int] = None
 
     def _get_human_detector(self) -> Optional[HumanDetectorBackend]:
         if not self._enable_visual_targeting:
@@ -357,9 +358,17 @@ class ActionRunner:
     def enter_cover(self, force: bool = False, settle_s: float = 0.25) -> PostureStatus:
         """Idempotently enter cover (`q` toggle): skips `q` when already classified `in_cover`."""
         posture, before_cap = self.classify_current_posture()
+        hint_hold_cover = (
+            self._in_cover_hint is True
+            and (
+                posture.state != "standing"
+                or posture.head_top_y is None
+                or posture.head_top_y >= 0.45
+            )
+        )
         if not force and (
             (posture.state == "in_cover" and posture.confidence >= 0.60)
-            or (posture.state == "unknown" and self._in_cover_hint is True)
+            or hint_hold_cover
         ):
             self._in_cover_hint = True
             self._logger.log(
@@ -378,7 +387,7 @@ class ActionRunner:
         b_fg = _road_gray_sample(before_cap.image)
         a_fg = _road_gray_sample(after_cap.image)
         shift_score = _road_motion_score(b_fg, a_fg)
-        self._in_cover_hint = True
+        self._in_cover_hint = (after_posture.state == "in_cover") or (shift_score >= 10.0)
         self._logger.log(
             tool="runner",
             action="enter_cover",
@@ -387,6 +396,7 @@ class ActionRunner:
                 "before_state": posture.state,
                 "after_state": after_posture.state,
                 "shift_score": round(shift_score, 2),
+                "in_cover_hint": self._in_cover_hint,
             },
         )
         return after_posture
@@ -442,13 +452,16 @@ class ActionRunner:
         min_response_px: float = 3.0,
         save_path: Optional[Path | str] = Path("logs/calibration.json"),
     ) -> dict[str, object]:
-        """Run a <=5s startup input & ADS/hipfire camera gain self-calibration."""
+        """Run a <=5s startup input, yaw ADS/hipfire gain, and vertical pitch-sign self-calibration."""
         start_t = self._clock()
         tracker = CameraMotionTracker()
         hipfire_yaw_px = 0.0
         hipfire_conf = 0.0
         ads_yaw_px = 0.0
         ads_conf = 0.0
+        pitch_down_sign: Optional[int] = None
+        pitch_px_per_dy = 0.0
+        pitch_conf = 0.0
         minimap_visible = False
 
         try:
@@ -471,6 +484,36 @@ class ActionRunner:
             self.input.mouse_delta(-probe_dx, 0, steps=4, duration_s=0.06)
             self._sleep(0.05)
 
+            # 1b) Vertical pitch-sign probe (delta_pitch_px > 0 means camera pitched DOWN).
+            probe_dy = max(12, abs(probe_dx))
+            c_v0 = capture_game_window(backend=self._window_backend, logger=self._logger, require_16_9=True)
+            tracker.update(c_v0.image)
+            self.input.mouse_delta(0, probe_dy, steps=4, duration_s=0.06)
+            self._sleep(0.06)
+            c_v1 = capture_game_window(backend=self._window_backend, logger=self._logger, require_16_9=True)
+            m_vp = tracker.update(c_v1.image)
+            self.input.mouse_delta(0, -probe_dy, steps=4, duration_s=0.06)
+            self._sleep(0.05)
+            vp_dp = float(m_vp.delta_pitch_px)
+            pitch_conf = float(m_vp.confidence)
+            if abs(vp_dp) >= min_response_px:
+                pitch_down_sign = 1 if vp_dp > 0 else -1
+                pitch_px_per_dy = abs(vp_dp) / max(1, probe_dy)
+            else:
+                c_v2 = capture_game_window(backend=self._window_backend, logger=self._logger, require_16_9=True)
+                tracker.update(c_v2.image)
+                self.input.mouse_delta(0, -probe_dy, steps=4, duration_s=0.06)
+                self._sleep(0.06)
+                c_v3 = capture_game_window(backend=self._window_backend, logger=self._logger, require_16_9=True)
+                m_vn = tracker.update(c_v3.image)
+                self.input.mouse_delta(0, probe_dy, steps=4, duration_s=0.06)
+                self._sleep(0.05)
+                vn_dp = float(m_vn.delta_pitch_px)
+                if abs(vn_dp) >= min_response_px:
+                    pitch_down_sign = -1 if vn_dp > 0 else 1
+                    pitch_px_per_dy = abs(vn_dp) / max(1, probe_dy)
+                    pitch_conf = float(m_vn.confidence)
+
             # 2) ADS yaw probe
             self.input.mouse_down("right")
             if aim_settle_s > 0:
@@ -489,6 +532,8 @@ class ActionRunner:
         finally:
             self.input.release_all(reason="calibrate_controls", suppress_errors=True)
 
+        if pitch_down_sign is not None:
+            self._pitch_down_sign = pitch_down_sign
         hipfire_gain = abs(hipfire_yaw_px) / max(1, abs(probe_dx))
         ads_gain = abs(ads_yaw_px) / max(1, abs(probe_dx))
         ads_hipfire_ratio = (ads_gain / hipfire_gain) if hipfire_gain > 1e-4 else 0.0
@@ -506,6 +551,9 @@ class ActionRunner:
             "ads_confidence": round(ads_conf, 3),
             "ads_px_per_dx": round(ads_gain, 3),
             "ads_to_hipfire_ratio": round(ads_hipfire_ratio, 3),
+            "pitch_down_sign": pitch_down_sign,
+            "pitch_px_per_dy": round(pitch_px_per_dy, 3),
+            "pitch_confidence": round(pitch_conf, 3),
             "warning": None if mouse_responsive else "mouse_unresponsive_check_raw_input_or_focus",
         }
         self._logger.log(tool="runner", action="calibrate_controls", status="ok", details=report)
@@ -515,6 +563,108 @@ class ActionRunner:
             tmp = out.with_name(f".{out.name}.tmp.{os.getpid()}")
             tmp.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
             os.replace(tmp, out)
+        return report
+
+    def level_camera_pitch(
+        self,
+        probe_dy: int = 14,
+        recovery_dy: int = 200,
+        settle_s: float = 0.06,
+        min_move_px: float = 4.0,
+        max_passes: int = 2,
+    ) -> dict[str, object]:
+        """Sign-agnostically detect ceiling/floor pitch clamping via optical flow and re-level toward horizon."""
+        probe = max(12, abs(int(probe_dy)))
+        rec = max(probe, abs(int(recovery_dy)))
+        total_applied_dy = 0
+        final_status = "horizon_ok"
+        last_pos_dp = 0.0
+        last_neg_dp = 0.0
+
+        for _ in range(max(1, int(max_passes))):
+            tracker = CameraMotionTracker()
+            c0 = capture_game_window(backend=self._window_backend, logger=self._logger, require_16_9=True)
+            tracker.update(c0.image)
+
+            # Probe +probe and return
+            self.input.mouse_delta(0, probe, steps=3, duration_s=0.05)
+            if settle_s > 0:
+                self._sleep(settle_s)
+            c_pos = capture_game_window(backend=self._window_backend, logger=self._logger, require_16_9=True)
+            m_pos = tracker.update(c_pos.image)
+            dp_pos = float(m_pos.delta_pitch_px)
+
+            self.input.mouse_delta(0, -probe, steps=3, duration_s=0.05)
+            if settle_s > 0:
+                self._sleep(settle_s)
+            c_mid = capture_game_window(backend=self._window_backend, logger=self._logger, require_16_9=True)
+            tracker.update(c_mid.image)
+
+            # Probe -probe and return
+            self.input.mouse_delta(0, -probe, steps=3, duration_s=0.05)
+            if settle_s > 0:
+                self._sleep(settle_s)
+            c_neg = capture_game_window(backend=self._window_backend, logger=self._logger, require_16_9=True)
+            m_neg = tracker.update(c_neg.image)
+            dp_neg = float(m_neg.delta_pitch_px)
+
+            self.input.mouse_delta(0, probe, steps=3, duration_s=0.05)
+            if settle_s > 0:
+                self._sleep(settle_s)
+
+            last_pos_dp = dp_pos
+            last_neg_dp = dp_neg
+
+            if abs(dp_pos) < min_move_px and abs(dp_neg) < min_move_px:
+                if total_applied_dy == 0:
+                    final_status = "unresponsive"
+                break
+
+            pos_clamped = (
+                m_pos.confidence >= 0.40
+                and abs(dp_neg) >= min_move_px * 1.5
+                and abs(dp_pos) < max(min_move_px, 0.45 * abs(dp_neg))
+            )
+            neg_clamped = (
+                m_neg.confidence >= 0.40
+                and abs(dp_pos) >= min_move_px * 1.5
+                and abs(dp_neg) < max(min_move_px, 0.45 * abs(dp_pos))
+            )
+
+            # delta_pitch_px > 0 means camera pitched DOWN; < 0 means pitched UP.
+            if pos_clamped:
+                # +probe hit limit; -probe moved freely -> move in -probe direction.
+                self._pitch_down_sign = -1 if dp_neg > 0 else 1
+                self.input.mouse_delta(0, -rec, steps=6, duration_s=0.09)
+                if settle_s > 0:
+                    self._sleep(settle_s)
+                total_applied_dy -= rec
+                final_status = "recovered_ceiling_clamp" if dp_neg > 0 else "recovered_floor_clamp"
+            elif neg_clamped:
+                # -probe hit limit; +probe moved freely -> move in +probe direction.
+                self._pitch_down_sign = 1 if dp_pos > 0 else -1
+                self.input.mouse_delta(0, rec, steps=6, duration_s=0.09)
+                if settle_s > 0:
+                    self._sleep(settle_s)
+                total_applied_dy += rec
+                final_status = "recovered_ceiling_clamp" if dp_pos > 0 else "recovered_floor_clamp"
+            else:
+                if abs(dp_pos) >= abs(dp_neg) and abs(dp_pos) >= min_move_px:
+                    self._pitch_down_sign = 1 if dp_pos > 0 else -1
+                elif abs(dp_neg) >= min_move_px:
+                    self._pitch_down_sign = -1 if dp_neg > 0 else 1
+                if total_applied_dy == 0:
+                    final_status = "horizon_ok"
+                break
+
+        report: dict[str, object] = {
+            "status": final_status,
+            "applied_dy": total_applied_dy,
+            "pitch_down_sign": self._pitch_down_sign,
+            "pos_probe_pitch_px": round(last_pos_dp, 2),
+            "neg_probe_pitch_px": round(last_neg_dp, 2),
+        }
+        self._logger.log(tool="runner", action="level_camera_pitch", status="ok", details=report)
         return report
 
     def _run_loop(
@@ -857,17 +1007,21 @@ class ActionRunner:
         arrive_distance: float = 0.08,
         steer_gain: float = 160.0,
         deadband: float = 0.05,
-        stop_on_subtitle_keywords: Sequence[str] = ("return to", "wait for", "stay with", "follow"),
+        stop_on_subtitle_keywords: Sequence[str] = ("return to", "wait for", "stay with", "follow", "get in cover"),
         enable_stuck_recovery: bool = True,
         stuck_window_s: float = 0.9,
         stuck_motion_threshold: float = 2.5,
         unstuck_duration_s: float = 0.55,
         vault_on_stuck: bool = True,
         cover_on_health_drop: bool = True,
+        level_pitch: bool = False,
         config: Optional[LoopConfig] = None,
     ) -> LoopResult:
         """Walk/sprint toward minimap route/objective with crew-tether subtitle stop and obstacle recovery."""
         cfg = config or LoopConfig(max_duration_s=10.0, hz=10.0)
+        self._in_cover_hint = False
+        if level_pitch:
+            self.level_camera_pitch()
         keys = ("w", "lshift") if sprint else ("w",)
         norm_keywords = tuple(kw.strip().lower() for kw in stop_on_subtitle_keywords if kw.strip())
         prev_gray: Optional[np.ndarray] = None
@@ -884,14 +1038,16 @@ class ActionRunner:
 
         def _on_tick(state: FrameState) -> Optional[str]:
             nonlocal prev_gray, last_motion_check_t, low_motion_elapsed_s, free_motion_elapsed_s, min_target_dist, target_stall_elapsed_s, last_dist_check_t, last_bearing, recovery_count, stuck_anchor_bearing, bypass_bearing_until_t
+            mm = state.minimap
+            target, bearing = self._resolve_route_target_and_bearing(mm, target_color)
             if state.hud is not None and norm_keywords:
                 combined_hud = f"{state.hud.subtitle_or_objective} {state.hud.help_prompt}".lower()
                 for kw in norm_keywords:
                     if kw in combined_hud:
+                        if kw == "get in cover" and target is not None and target.distance > max(arrive_distance * 2.0, 0.16):
+                            continue
                         return f"subtitle_keyword:{kw}"
 
-            mm = state.minimap
-            target, bearing = self._resolve_route_target_and_bearing(mm, target_color)
             if target is not None and target.distance <= arrive_distance:
                 return "target_reached"
 
@@ -973,6 +1129,27 @@ class ActionRunner:
                     last_dist_check_t = None
                     return None
 
+            close_range_orbit = (
+                target is not None
+                and bearing is not None
+                and target.distance <= max(arrive_distance * 3.0, 0.20)
+                and abs(bearing) >= 0.28
+            )
+            sharp_off_axis = bearing is not None and abs(bearing) >= 0.55
+            should_walk = (state.elapsed_s < bypass_bearing_until_t) or (
+                not close_range_orbit and not sharp_off_axis
+            )
+            if should_walk:
+                if "w" not in self.input.held_keys:
+                    self.input.key_down("w")
+                if sprint and "lshift" not in self.input.held_keys:
+                    self.input.key_down("lshift")
+            else:
+                if "lshift" in self.input.held_keys:
+                    self.input.key_up("lshift")
+                if "w" in self.input.held_keys:
+                    self.input.key_up("w")
+
             if (
                 bearing is not None
                 and abs(bearing) > deadband
@@ -1011,6 +1188,126 @@ class ActionRunner:
             steer_gain=steer_gain,
             stop_on_subtitle_keywords=(),
             config=config,
+        )
+
+    def approach_and_enter_cover(
+        self,
+        target_color: str = "yellow",
+        arrive_distance: float = 0.085,
+        max_duration_s: float = 22.0,
+        level_pitch: bool = True,
+        probe_step_s: float = 0.30,
+        config: Optional[LoopConfig] = None,
+    ) -> LoopResult:
+        """Walk to cover objective (`vault_on_stuck=False`), enter cover (`q`), and probe faces until confirmed."""
+        cfg = config or LoopConfig(max_duration_s=max_duration_s, hz=10.0)
+        start_t = self._clock()
+        self._logger.log(
+            tool="runner",
+            action="approach_and_enter_cover_start",
+            status="ok",
+            details={"target_color": target_color, "arrive_distance": arrive_distance, "max_duration_s": cfg.max_duration_s},
+        )
+        if level_pitch:
+            self.level_camera_pitch()
+
+        approach_budget = max(2.0, min(cfg.max_duration_s * 0.65, 14.0))
+        approach_cfg = LoopConfig(
+            max_duration_s=approach_budget,
+            hz=cfg.hz,
+            hud_check_interval_s=cfg.hud_check_interval_s,
+            health_drop_threshold=cfg.health_drop_threshold,
+            stop_on_banner=cfg.stop_on_banner,
+        )
+        approach_res = self.follow_route_on_foot(
+            sprint=False,
+            target_color=target_color,
+            arrive_distance=arrive_distance,
+            stop_on_subtitle_keywords=("return to", "wait for", "stay with", "follow"),
+            vault_on_stuck=False,
+            cover_on_health_drop=True,
+            level_pitch=False,
+            config=approach_cfg,
+        )
+        if approach_res.banner is not None or approach_res.stop_reason.startswith("banner:"):
+            return approach_res
+
+        last_hud = approach_res.last_hud
+        last_mm = approach_res.last_minimap
+        ticks = approach_res.ticks
+        stop_reason = "timeout"
+
+        def _is_cover_confirmed(mm: MinimapObservation, posture: PostureStatus) -> bool:
+            target, _ = self._resolve_route_target_and_bearing(mm, target_color)
+            if posture.state == "in_cover" and posture.confidence >= 0.60:
+                return True
+            if self._in_cover_hint is True and (target is None or target.distance > max(arrive_distance * 2.5, 0.22)):
+                return True
+            if target is None or target.distance > max(arrive_distance * 2.5, 0.22):
+                return True
+            if len(mm.targets.get("red", ())) > 0 and target is None:
+                return True
+            return False
+
+        probe_sequence = (
+            ("w", probe_step_s),
+            ("a", probe_step_s),
+            ("d", probe_step_s * 1.4),
+            ("s", probe_step_s),
+        )
+        probe_idx = 0
+        try:
+            while (self._clock() - start_t) < cfg.max_duration_s:
+                posture = self.enter_cover(force=(self._in_cover_hint is not True), settle_s=0.22)
+                cap = capture_game_window(backend=self._window_backend, logger=self._logger, require_16_9=True)
+                mm = inspect_minimap(cap.image, logger=self._logger)
+                hud = inspect_frame(cap.image, ocr_backend=self._ocr_backend, logger=self._logger)
+                last_mm = mm
+                last_hud = hud
+                ticks += 1
+
+                if cfg.stop_on_banner and hud.banner is not None:
+                    stop_reason = f"banner:{hud.banner}"
+                    break
+                if _is_cover_confirmed(mm, posture):
+                    stop_reason = "cover_entered"
+                    break
+
+                if (self._clock() - start_t) >= cfg.max_duration_s - 0.35:
+                    break
+
+                # Steer toward blip if visible and step along probe perimeter before retrying `q`.
+                _, bearing = self._resolve_route_target_and_bearing(mm, target_color)
+                if bearing is not None and abs(bearing) > 0.15:
+                    dx = int(round(max(-220.0, min(220.0, bearing * 180.0))))
+                    if dx != 0:
+                        self._steer_camera(dx, 0)
+                step_key, step_dur = probe_sequence[probe_idx % len(probe_sequence)]
+                probe_idx += 1
+                self._in_cover_hint = False
+                self.input.key_down(step_key)
+                try:
+                    self._sleep_chunked(min(step_dur, max(0.05, cfg.max_duration_s - (self._clock() - start_t) - 0.3)))
+                finally:
+                    self.input.key_up(step_key)
+        finally:
+            self.input.release_all(reason=f"runner:approach_and_enter_cover:{stop_reason}", suppress_errors=True)
+
+        total_elapsed = max(0.0, self._clock() - start_t)
+        self._logger.log(
+            tool="runner",
+            action="approach_and_enter_cover",
+            status="ok",
+            details={"stop_reason": stop_reason, "ticks": ticks, "elapsed_s": round(total_elapsed, 3)},
+        )
+        return LoopResult(
+            stop_reason=stop_reason,
+            ticks=ticks,
+            elapsed_s=total_elapsed,
+            banner=last_hud.banner if last_hud else None,
+            last_hud=last_hud,
+            last_minimap=last_mm,
+            actions_sent=ticks,
         )
 
     def advance_under_fire(

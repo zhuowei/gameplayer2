@@ -111,3 +111,15 @@ Escalating deep perception and control failures to `Carbon` specialists produced
   - `player-4` collected the `$177,000` vault cash (`#292`) and cleared the Prologue security-guard hostage ambush via `reticle_shot` headshot (`#298`) after two timing retries on the Trevor wheel switch (`#296`–`#297`).
   - **Cycle 4 (`faed7a6`)**: Added Bug-algorithm `bypass_bearing_until_t` (`0.75s` post-sidestep) + immediate `"s"` back-off on all `follow_route_on_foot` stuck recoveries so indoor walls are bypassed instead of immediately turning back into the same wall.
   - **Cycle 5 (`retro2_check.png`, `#299`)**: After the hostage shot (`08:00:07–08:01:17Z`), `11` `on_foot_stuck_recovery` calls oscillated `d, a, d, a` + `vault=True` against the narrow left steel vault doorway jamb because `0.55s` lateral hops overshot the doorway and alternating every step bounced jamb-to-door. Updated `_perform_on_foot_sidestep` / `follow_route_on_foot` to commit `2` gentle steps per side (`0.28s`, `0.42s`) before flipping (`((attempt - 1) // 2) % 2`), skip `vault` on doorway jamb retries (`attempt >= 2`), and extend `bypass_bearing_until_t` to `1.1s`.
+
+---
+
+## 7. Checkpoint 3 (2026-11-21 00:32 PST)
+
+- **Progression & Telemetry (`1e6fc22`, Cycle 7)**:
+  - **Cycle 6 (`1e6fc22`, `#303`)**: Exiting the vault doorway left Trevor wedged against a Shutter Room concrete pillar while `follow_route_on_foot` panned `dx=101..20` (`_road_motion_score >= 2.5`), masking the stall for `10s`. Added minimap `min_target_dist` / `target_stall_elapsed_s` stall detection (`dist_stall_window_s = max(stuck_window_s * 2.2, 2.2)`) plus boosted off-axis steer gain (`max(steer_gain, 240.0)`); Trevor cleared the doorway into the Shutter Room (`clips/check_0827.mp4`).
+  - **Root Causes in `23m` Shutter Room Stall (`#308`, `#310`, `#311`)**:
+    1. **Unverified vertical mouse sign (`captures/retro3_check.png`)**: `8` `+dy` deltas (`+1,270` total) pitched the camera straight UP into the ceiling because `calibrate_controls()` never probed vertical `dy` (`pitch_down_sign` was `-1`).
+    2. **`enter_cover()` untoggled chest-high cover**: `08:28:03Z` produced `shift_score=19.1` (entering chest-high counter cover), but `classify_posture()` only scanned full-height rows `27..153` and returned `"standing"`, causing subsequent `enter_cover()` calls to toggle Trevor back out (`shift_score=6.51, 7.22`).
+    3. **Close-range orbiting & missing cover-objective loop**: `follow_route_on_foot` kept `"w"` held while turning `dist < 0.20` (`orbiting`) and had no closed-loop `approach_and_enter_cover()` / `"get in cover"` stop.
+  - **Cycle 7 Fixes**: Added lower chest-high cover detection (`rows 88..162`) + ambiguous `"unknown"` band (`0.96..1.15`), latched `_in_cover_hint = True` on `shift_score >= 10.0` so `enter_cover()` never untoggles cover, added vertical `pitch_down_sign` calibration to `calibrate_controls()` (`logs/calibration.json`), added sign-agnostic `level_camera_pitch()` with confidence-gated clamp checks, added close-range pivot + `"get in cover"` stop to `follow_route_on_foot`, and added `ActionRunner.approach_and_enter_cover()` / `prologue_shutter_cover()`.

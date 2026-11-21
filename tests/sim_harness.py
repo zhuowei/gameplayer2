@@ -128,6 +128,9 @@ class KinematicWorld:
     cover_yaw_clamp_deg: Optional[float] = None
     drop_mouse_deltas: bool = False
     drop_after_right_release_s: float = 0.0
+    invert_pitch: bool = False
+    cover_snap_radius_m: Optional[float] = None
+    clear_yellow_on_cover_snap: bool = False
 
     enemies: list[SimEnemy] = field(default_factory=list)
     allies: list[SimAlly] = field(default_factory=list)
@@ -251,7 +254,8 @@ class KinematicWorld:
         if self.in_cover and "right" in held_buttons and self.cover_yaw_clamp_deg is not None:
             new_yaw = max(-self.cover_yaw_clamp_deg, min(self.cover_yaw_clamp_deg, new_yaw))
         self.yaw_deg = new_yaw
-        self.pitch_deg = max(-60.0, min(60.0, self.pitch_deg + dy * sens))
+        eff_dy = -dy if self.invert_pitch else dy
+        self.pitch_deg = max(-60.0, min(60.0, self.pitch_deg + eff_dy * sens))
         self.max_abs_pitch_deg = max(self.max_abs_pitch_deg, abs(self.pitch_deg))
 
     def apply_fire(self) -> None:
@@ -296,6 +300,25 @@ class KinematicWorld:
         # Sky & snow ground
         draw.rectangle((0, 0, w, max(0, min(h, horizon_y))), fill=(95, 112, 134))
         draw.rectangle((0, max(0, min(h, horizon_y)), w, h), fill=(195, 206, 218))
+        # Overhead ceiling panels/lights across [-72..-24 deg] (off-screen at horizon) for 2D pitch optical flow.
+        ceiling_features = (
+            (-71.0, 0.34, 0.52, 7, (58, 72, 92)),
+            (-65.0, 0.62, 0.86, 6, (134, 146, 164)),
+            (-60.0, 0.38, 0.58, 8, (50, 64, 84)),
+            (-54.0, 0.66, 0.90, 6, (128, 140, 158)),
+            (-47.0, 0.35, 0.54, 8, (54, 68, 90)),
+            (-40.0, 0.60, 0.88, 7, (132, 144, 162)),
+            (-33.0, 0.40, 0.60, 7, (52, 66, 86)),
+            (-26.0, 0.64, 0.86, 6, (126, 138, 156)),
+        )
+        for beam_deg, fx0, fx1, bh, color in ceiling_features:
+            by = int(round(h * (0.50 + (beam_deg - self.pitch_deg) / self.fov_v_deg)))
+            if 0 <= by < h and by < horizon_y:
+                x_a, x_b = int(w * fx0), int(w * fx1)
+                draw.rectangle((x_a, by - bh, x_b, by + bh), fill=color)
+                # Vertical panel ribs for strong 2D high-pass lock vs center reticle dot
+                for rx in range(x_a + 10, x_b - 6, 22):
+                    draw.rectangle((rx, by - bh - 4, rx + 5, by + bh + 4), fill=(36, 46, 62))
         # World-anchored snow tracks in [11.5..34m] so every walking step produces >4.0 road motion inside y=[0.15..0.72]
         rad = math.radians(self.yaw_deg)
         along = self.player_x * math.sin(rad) + self.player_y * math.cos(rad)
@@ -365,7 +388,10 @@ class KinematicWorld:
                 x0 = int(round((0.5 + min_a / self.fov_h_deg) * w))
                 x1 = int(round((0.5 + max_a / self.fov_h_deg) * w))
                 top_y = int(round(horizon_y - (math.degrees(math.atan2(occ.height_m - self.eye_z, max(0.5, d))) / self.fov_v_deg) * h))
-                draw.rectangle((x0, max(0, top_y), x1, min(h, horizon_y + 120)), fill=(82, 84, 88), outline=(55, 57, 62))
+                y0_r = max(0, top_y)
+                y1_r = min(h, horizon_y + 120)
+                if x1 > x0 and y1_r > y0_r:
+                    draw.rectangle((x0, y0_r, x1, y1_r), fill=(82, 84, 88), outline=(55, 57, 62))
 
         # Paste calibrated minimap back in bottom-left
         base.paste(minimap_crop, (0, int(h * 0.72)))
@@ -421,6 +447,15 @@ class SimInputBackend:
         self.events.append(("key_down", key))
         if key == "q":
             self.world.in_cover = not self.world.in_cover
+            if (
+                self.world.in_cover
+                and self.world.clear_yellow_on_cover_snap
+                and self.world.yellow_target is not None
+            ):
+                tx, ty = self.world.yellow_target
+                rad = self.world.cover_snap_radius_m if self.world.cover_snap_radius_m is not None else 2.5
+                if math.hypot(tx - self.world.player_x, ty - self.world.player_y) <= rad:
+                    self.world.yellow_target = None
 
     def key_up(self, key: str) -> None:
         self.world.held_keys.discard(key)
