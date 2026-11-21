@@ -297,6 +297,7 @@ class ActionRunner:
         self._pitch_down_sign: Optional[int] = None
         self._pitch_px_per_dy: Optional[float] = None
         self._last_flank_streak: int = 0
+        self._last_flank_base_side: str = "d"
 
     def _get_human_detector(self) -> Optional[HumanDetectorBackend]:
         if not self._enable_visual_targeting:
@@ -1912,14 +1913,19 @@ class ActionRunner:
                         if engage_red_hits > 0:
                             blocked_flank_streak = 0
                             self._last_flank_streak = 0
+                            self._last_flank_base_side = "d"
                             recovery_count += 1
                             self._perform_on_foot_sidestep(recovery_count, enemy.bearing, 0.35, False)
                             _enter_engage_phase()
                             return None
-                        # Zero red_reticle locks across engage window (e.g. blocked behind SUV/pillar): commit 4 streaks per side around wide obstacle.
+                        # Zero red_reticle locks across engage window: pick away-from-enemy side initially and flip polarity every 2 streaks.
                         blocked_flank_streak += 1
                         self._last_flank_streak = blocked_flank_streak
-                        flank_key = "d" if ((blocked_flank_streak - 1) // 4) % 2 == 0 else "a"
+                        if blocked_flank_streak == 1:
+                            self._last_flank_base_side = "a" if enemy.bearing > 0.20 else "d"
+                        flip_side = ((blocked_flank_streak - 1) // 2) % 2 == 1
+                        opp_side = "a" if self._last_flank_base_side == "d" else "d"
+                        flank_key = opp_side if flip_side else self._last_flank_base_side
                         self._logger.log(
                             tool="runner",
                             action="advance_flank_unblock",
@@ -1972,6 +1978,7 @@ class ActionRunner:
                     engage_red_hits += 1
                     blocked_flank_streak = 0
                     self._last_flank_streak = 0
+                    self._last_flank_base_side = "d"
                     visual_suppressed_until_t = 0.0
                     self._fire_bursts("left", bursts=3, hold_s=0.03, gap_s=0.025, reason="red_reticle")
                     cam_fb.fired_last_tick = True
@@ -2128,6 +2135,132 @@ class ActionRunner:
                 },
             )
         return result
+
+    def enter_nearest_vehicle(
+        self,
+        *,
+        target_color: str = "blue",
+        arrive_distance: float = 0.06,
+        approach_duration_s: float = 12.0,
+        enter_key: str = "f",
+        settle_s: float = 2.5,
+        enter_prompt_keywords: Sequence[str] = ("get in", "enter", "vehicle", "car"),
+        post_drive_keywords: Sequence[str] = ("get to", "drive", "lose", "escape", "follow", "cops", "police"),
+        config: Optional[LoopConfig] = None,
+    ) -> LoopResult:
+        """Approach nearest vehicle blip without overshooting, tap `enter_key`, and verify boarding before driving."""
+        start_t = self._clock()
+        cfg = config or LoopConfig(max_duration_s=approach_duration_s + settle_s + 2.0, hz=10.0)
+        enter_kws = tuple(k.strip().lower() for k in enter_prompt_keywords if k.strip())
+        drive_kws = tuple(k.strip().lower() for k in post_drive_keywords if k.strip())
+        ticks = 0
+        actions_sent = 0
+        last_hud: Optional[HudObservation] = None
+        last_mm: Optional[MinimapObservation] = None
+        stop_reason = "vehicle_entry_unconfirmed"
+        banner: Optional[str] = None
+
+        try:
+            cap0 = capture_game_window(backend=self._window_backend, logger=self._logger, require_16_9=True)
+            mm0 = inspect_minimap(cap0.image, logger=self._logger)
+            hud0 = inspect_frame(cap0.image, ocr_backend=self._ocr_backend, logger=self._logger)
+            last_mm, last_hud = mm0, hud0
+            ticks += 1
+
+            if cfg.stop_on_focus_loss and not cap0.window.is_frontmost:
+                return LoopResult("focus_lost", ticks, self._clock() - start_t, None, last_hud, last_mm, actions_sent)
+            if cfg.stop_on_banner and hud0.banner is not None:
+                return LoopResult(f"banner:{hud0.banner}", ticks, self._clock() - start_t, hud0.banner, last_hud, last_mm, actions_sent)
+
+            t0, _ = self._resolve_route_target_and_bearing(mm0, target_color)
+            if t0 is not None and t0.distance > arrive_distance:
+                app_res = self.follow_route_on_foot(
+                    sprint=False,
+                    target_color=target_color,
+                    arrive_distance=arrive_distance,
+                    stop_on_subtitle_keywords=enter_kws,
+                    enable_stuck_recovery=True,
+                    vault_on_stuck=False,
+                    cover_on_health_drop=False,
+                    level_pitch=False,
+                    config=LoopConfig(
+                        max_duration_s=min(approach_duration_s, max(1.0, cfg.max_duration_s - settle_s - 0.5)),
+                        hz=cfg.hz,
+                        hud_check_interval_s=cfg.hud_check_interval_s,
+                        stop_on_banner=cfg.stop_on_banner,
+                        stop_on_focus_loss=cfg.stop_on_focus_loss,
+                        health_drop_threshold=None,
+                    ),
+                )
+                ticks += app_res.ticks
+                actions_sent += app_res.actions_sent
+                if app_res.last_minimap is not None:
+                    last_mm = app_res.last_minimap
+                if app_res.last_hud is not None:
+                    last_hud = app_res.last_hud
+                if app_res.stop_reason.startswith("banner:") or app_res.stop_reason == "focus_lost":
+                    return LoopResult(app_res.stop_reason, ticks, self._clock() - start_t, app_res.banner, last_hud, last_mm, actions_sent)
+
+            pre_cap = capture_game_window(backend=self._window_backend, logger=self._logger, require_16_9=True)
+            pre_mm = inspect_minimap(pre_cap.image, logger=self._logger)
+            pre_hud = inspect_frame(pre_cap.image, ocr_backend=self._ocr_backend, logger=self._logger)
+            last_mm, last_hud = pre_mm, pre_hud
+            pre_gray = _road_gray_sample(pre_cap.image)
+            pre_text = f"{pre_hud.subtitle_or_objective} {pre_hud.help_prompt}".lower()
+            pre_had_enter = any(k in pre_text for k in enter_kws)
+            pre_target, _ = self._resolve_route_target_and_bearing(pre_mm, target_color)
+            pre_yellow_route = pre_mm.yellow_route_bearing
+
+            self._tap_key_preserving_held(enter_key, hold_s=0.08)
+            actions_sent += 1
+
+            poll_start = self._clock()
+            max_settle_t = max(0.25, min(settle_s, cfg.max_duration_s - (poll_start - start_t)))
+            while (self._clock() - poll_start) < max_settle_t:
+                self._sleep(min(0.25, max(0.05, max_settle_t - (self._clock() - poll_start))))
+                cur_cap = capture_game_window(backend=self._window_backend, logger=self._logger, require_16_9=True)
+                cur_mm = inspect_minimap(cur_cap.image, logger=self._logger)
+                cur_hud = inspect_frame(cur_cap.image, ocr_backend=self._ocr_backend, logger=self._logger)
+                last_mm, last_hud = cur_mm, cur_hud
+                ticks += 1
+
+                if cfg.stop_on_focus_loss and not cur_cap.window.is_frontmost:
+                    stop_reason = "focus_lost"
+                    break
+                if cfg.stop_on_banner and cur_hud.banner is not None:
+                    banner = cur_hud.banner
+                    stop_reason = f"banner:{cur_hud.banner}"
+                    break
+
+                cur_text = f"{cur_hud.subtitle_or_objective} {cur_hud.help_prompt}".lower()
+                cur_has_enter = any(k in cur_text for k in enter_kws)
+                cur_has_drive = any(k in cur_text for k in drive_kws) and not cur_has_enter
+                cur_target, _ = self._resolve_route_target_and_bearing(cur_mm, target_color)
+                shift_score = _road_motion_score(pre_gray, _road_gray_sample(cur_cap.image))
+
+                if (
+                    (pre_had_enter and not cur_has_enter)
+                    or cur_has_drive
+                    or (pre_yellow_route is None and cur_mm.yellow_route_bearing is not None)
+                    or (pre_target is not None and cur_target is None and (self._clock() - poll_start) >= 0.75)
+                    or (shift_score >= 12.0 and not cur_has_enter and (self._clock() - poll_start) >= 0.75)
+                ):
+                    stop_reason = "entered_vehicle"
+                    break
+
+            self._logger.log(
+                tool="runner",
+                action="enter_nearest_vehicle",
+                status="ok" if stop_reason == "entered_vehicle" else "warn",
+                details={
+                    "stop_reason": stop_reason,
+                    "target_color": target_color,
+                    "pre_dist": round(pre_target.distance, 3) if pre_target is not None else None,
+                },
+            )
+            return LoopResult(stop_reason, ticks, self._clock() - start_t, banner, last_hud, last_mm, actions_sent)
+        finally:
+            self.input.release_all()
 
     def follow_gps_drive(
         self,

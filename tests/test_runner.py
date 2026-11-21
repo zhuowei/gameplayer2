@@ -1690,7 +1690,7 @@ def test_advance_flank_unblock_handles_single_occluded_enemy_and_commits_4_strea
     log_path = tmp_path / "t_flank4.jsonl"
     logger = TelemetryLogger(log_path)
     ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
-    # Single occluded close enemy (<= 0.32, 0 red_reticle locks) triggers advance_flank_unblock and commits 4 consecutive 'd' flanks before flipping to 'a'.
+    # Single occluded close enemy (<= 0.32, 0 red_reticle locks) triggers advance_flank_unblock and flips polarity every 2 streaks ('d', 'd', 'a', 'a', 'd').
     f_single_close_occ = _with_center_reticle(
         make_synthetic_minimap_frame(health_ratio=0.90, red_points=[(0.50, 0.62)]),
         (224, 224, 224),
@@ -1705,7 +1705,7 @@ def test_advance_flank_unblock_handles_single_occluded_enemy_and_commits_4_strea
     )
     flanks = [r for r in read_telemetry(log_path, tool="runner") if r.get("action") == "advance_flank_unblock"]
     assert len(flanks) >= 5
-    assert [f["details"]["flank_key"] for f in flanks[:5]] == ["d", "d", "d", "d", "a"]
+    assert [f["details"]["flank_key"] for f in flanks[:5]] == ["d", "d", "a", "a", "d"]
     assert backend.currently_held_keys == set()
     assert backend.currently_held_buttons == set()
 

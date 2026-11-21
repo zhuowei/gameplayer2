@@ -168,3 +168,16 @@ Escalating deep perception and control failures to `Carbon` specialists produced
     1. Crouched/hood-peeking cops behind white Police SUV roadblocks were missed by the full-height Vision ROI (`0.20..0.76`), while blind minimap bearing fired `2`-burst suppressive rounds into the SUV steel door (`67` bursts, `3/70` = `4.3%` `red_reticle`, depleting rifle reserve to `12 | 21`).
     2. `hold_engage_threat` doubled engage hold (`3.2s -> 6.5s`) even with `0` `red_reticle` hits, and `advance_flank_unblock` (`0.55s` `'d'` + `0.65s` `'w'`) failed to clear wide `~3m` SUVs and reset `blocked_flank_streak` across `advance_under_fire` timeouts.
   - **Cycle 13 Fixes**: Added hood-height `VisionHumanDetectorBackend` fallback ROI `(0.22, 0.25, 0.88, 0.58)` when primary ROI yields `None`; cut blind suppressive bursts when `engage_red_hits == 0` and `visual is None` to a single `1`-burst probe (`no_lock_ticks == 8` in `advance_under_fire`, `bursts=1` in `cover_peek_combat`) and skipped `hold_engage_threat` extension when `engage_red_hits == 0`; widened `advance_flank_unblock` to `0.85s` lateral strafe + `0.85s` forward clearance and persisted `self._last_flank_streak` across `advance_under_fire` calls.
+
+---
+
+## 12. Checkpoint 8 (2026-11-21 03:03 PST / 11:03Z)
+
+- **What went right (`508bfb9`, `01ed49f`, `#372`)**:
+  - Cycle 13 (`01ed49f`) lifted `10:43–11:03Z` `red_reticle` bursts to **`46/130` (`35.4%`; `52/151` = `34.4%` across the 30-min window)**, and `advance_under_fire` hit `target_reached` out the gate (`10:38:19`), putting Trevor beside the getaway SUV (`blue=0.099`, `#361`).
+  - Cycle 14 (`508bfb9`, `127 passed`) eliminated the blind `cover_peek_combat(enter_cover=True)` `'q'` untoggle trap after `advance_under_fire` `low_health` (`tap_cover=True`) via idempotent `self.enter_cover(force=False)` and exposed-standing `cover_duck` guard.
+- **What did not work (`#363`, `#368`, `#372`)**:
+  1. **Getaway SUV overshoot (`#363`, `10:40:11`)**: Blind `w 0.8s + f` ran past the getaway SUV, so `follow_gps_drive` ran `35s` on foot into the snowfield -> `"The crew were left behind."`.
+  2. **`advance_flank_unblock` 4-streak one-side lock (`runner.py:1922`)**: Locked `4` consecutive attempts (`((streak - 1) // 4) % 2 == 0`) onto `'d'` (`10:57:46–10:58:15`, `11:01:12–11:01:47`) while `enemy_distance` stayed pinned at `0.157–0.180`, wasting full `50s` advance runs.
+  3. **Tall-pillar `enter_cover` (`10:43:44`, `10:50:00`, `#368`)**: `shift_score=26.85 / 22.0` latched `_in_cover_hint=True` while `classify_posture` returned `"standing"` near tall pillar silhouettes, and flanking cops on the front pillar still damaged Trevor during `cover_duck` (`10:52:23 -> 10:52:59`).
+- **Cycle 15 Fixes**: Flipped `advance_flank_unblock` polarity after **2** blocked attempts (`// 2` instead of `// 4`, picking initial side away from `enemy.bearing` when `abs(enemy.bearing) > 0.12` on `streak == 1`), and added `ActionRunner.enter_nearest_vehicle()` (closed-loop `follow_route_on_foot` approach + `'f'` tap + HUD/route/scene boarding verification before `follow_gps_drive`).

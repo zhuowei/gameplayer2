@@ -849,8 +849,8 @@ def test_hood_roi_vision_pass_conserves_blind_ammo_and_persists_wider_flank_bias
         scan_pattern=(),
         config=LoopConfig(max_duration_s=9.5, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
     )
-    # Run 2 on the same runner must persist _last_flank_streak and flip cleanly onto 'a' instead of repeating 'd'!
-    runner_b._last_flank_streak = 4
+    # Run 2 on the same runner must persist _last_flank_streak and flip cleanly onto 'a' after 2 streaks instead of repeating 'd'!
+    runner_b._last_flank_streak = 2
     runner_b.advance_under_fire(
         aim_settle_s=0.0,
         move_phase_s=0.1,
@@ -864,7 +864,7 @@ def test_hood_roi_vision_pass_conserves_blind_ammo_and_persists_wider_flank_bias
     assert len(bursts_b) >= 1
     assert all(b["details"]["bursts"] == 1 for b in bursts_b)
     flanks_b = [r for r in logs_b if r.get("action") == "advance_flank_unblock"]
-    assert flanks_b[-1]["details"]["streak"] == 5
+    assert flanks_b[-1]["details"]["streak"] == 3
     assert flanks_b[-1]["details"]["flank_key"] == "a"
     # Verify 0.85s lateral hold in FakeClock timestamps
     d_down_idx = next(i for i, ev in enumerate(backend_b.events) if ev == ("key_down", "d"))
@@ -941,3 +941,81 @@ def test_cover_peek_combat_enter_cover_true_after_low_health_does_not_untoggle_q
     assert ("key_down", "q") in backend2.events
     assert backend2.currently_held_keys == set()
     assert backend2.currently_held_buttons == set()
+
+
+def test_advance_flank_unblock_away_from_bearing_and_enter_nearest_vehicle(tmp_path) -> None:
+    """Re #372: flank picks away-from-enemy side & flips every 2 streaks; enter_nearest_vehicle verifies boarding."""
+    # 1) Enemy bearing > +0.12 -> streak 1..2 pick 'a', streak 3 flips to 'd'
+    f_right_occ = make_synthetic_minimap_frame(health_ratio=0.95, red_points=[(0.62, 0.62)])  # bearing ~ +0.25 (> 0.12)
+    ImageDraw.Draw(f_right_occ).rectangle((318, 178, 322, 182), fill=(240, 240, 240))
+    clock_f = FakeClock()
+    backend_f = RecordingInputBackend()
+    log_f = tmp_path / "flank_away.jsonl"
+    ctrl_f = InputController(backend_f, TelemetryLogger(log_f), clock=clock_f, sleep_fn=clock_f.sleep, register_signals=False)
+    runner_f = ActionRunner(
+        ctrl_f,
+        ReplayWindowBackend(lambda _i: f_right_occ),
+        ScriptedHudOCR(lambda _i: {}),
+        TelemetryLogger(log_f),
+        clock=clock_f,
+        sleep_fn=clock_f.sleep,
+        enable_visual_targeting=False,
+    )
+    runner_f.advance_under_fire(
+        aim_settle_s=0.0,
+        move_phase_s=0.1,
+        engage_phase_s=0.5,
+        scan_pattern=(),
+        config=LoopConfig(max_duration_s=10.5, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    flanks = [r for r in read_telemetry(log_f, tool="runner") if r.get("action") == "advance_flank_unblock"]
+    assert len(flanks) >= 3
+    assert [f["details"]["flank_key"] for f in flanks[:3]] == ["a", "a", "d"]
+
+    # 2) enter_nearest_vehicle: approaches blue car blip, presses 'f', confirms entered_vehicle on HUD/route transition
+    f_car_far = make_synthetic_minimap_frame(health_ratio=0.90, blue_points=[(0.50, 0.56)])
+    f_car_near = make_synthetic_minimap_frame(health_ratio=0.90, blue_points=[(0.50, 0.74)])
+    f_in_car = make_synthetic_minimap_frame(health_ratio=0.90, route_yellow_rel=[(0.50, 0.55), (0.52, 0.10)])
+    frames_car = [f_car_far, f_car_far, f_car_near, f_car_near, f_in_car, f_in_car]
+    ocr_lines = {
+        0: {},
+        1: {},
+        2: {"bottom_subtitle": [OcrLine("Get in the car.", 0.95, (0.2, 0.8, 0.6, 0.1))]},
+        3: {"bottom_subtitle": [OcrLine("Get in the car.", 0.95, (0.2, 0.8, 0.6, 0.1))]},
+        4: {"bottom_subtitle": [OcrLine("Escape the cops.", 0.95, (0.2, 0.8, 0.6, 0.1))]},
+        5: {"bottom_subtitle": [OcrLine("Escape the cops.", 0.95, (0.2, 0.8, 0.6, 0.1))]},
+    }
+    clock_c = FakeClock()
+    backend_c = RecordingInputBackend()
+    log_c = tmp_path / "enter_car.jsonl"
+    ctrl_c = InputController(backend_c, TelemetryLogger(log_c), clock=clock_c, sleep_fn=clock_c.sleep, register_signals=False)
+    runner_c = ActionRunner(
+        ctrl_c,
+        ReplayWindowBackend(lambda idx: frames_car[min(idx, len(frames_car) - 1)]),
+        ScriptedHudOCR(lambda idx: ocr_lines.get(min(idx, 5), {})),
+        TelemetryLogger(log_c),
+        clock=clock_c,
+        sleep_fn=clock_c.sleep,
+    )
+    res_ok = runner_c.enter_nearest_vehicle(target_color="blue", arrive_distance=0.06, settle_s=1.0)
+    assert res_ok.stop_reason == "entered_vehicle"
+    assert ("key_down", "f") in backend_c.events
+    assert backend_c.currently_held_keys == set()
+
+    # 3) enter_nearest_vehicle detects miss ("vehicle_entry_unconfirmed") if 'f' doesn't change HUD/route/scene
+    clock_m = FakeClock()
+    backend_m = RecordingInputBackend()
+    log_m = tmp_path / "miss_car.jsonl"
+    ctrl_m = InputController(backend_m, TelemetryLogger(log_m), clock=clock_m, sleep_fn=clock_m.sleep, register_signals=False)
+    runner_m = ActionRunner(
+        ctrl_m,
+        ReplayWindowBackend(lambda _i: f_car_near),
+        ScriptedHudOCR(lambda _i: {"bottom_subtitle": [OcrLine("Get in the car.", 0.95, (0.2, 0.8, 0.6, 0.1))]}),
+        TelemetryLogger(log_m),
+        clock=clock_m,
+        sleep_fn=clock_m.sleep,
+    )
+    res_miss = runner_m.enter_nearest_vehicle(target_color="blue", arrive_distance=0.06, settle_s=0.6)
+    assert res_miss.stop_reason == "vehicle_entry_unconfirmed"
+    assert ("key_down", "f") in backend_m.events
+    assert backend_m.currently_held_keys == set()
