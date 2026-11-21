@@ -878,9 +878,10 @@ class ActionRunner:
         low_motion_elapsed_s = 0.0
         last_bearing = 0.0
         recovery_count = 0
+        bypass_bearing_until_t = 0.0
 
         def _on_tick(state: FrameState) -> Optional[str]:
-            nonlocal prev_gray, last_motion_check_t, low_motion_elapsed_s, last_bearing, recovery_count
+            nonlocal prev_gray, last_motion_check_t, low_motion_elapsed_s, last_bearing, recovery_count, bypass_bearing_until_t
             if state.hud is not None and norm_keywords:
                 combined_hud = f"{state.hud.subtitle_or_objective} {state.hud.help_prompt}".lower()
                 for kw in norm_keywords:
@@ -916,13 +917,13 @@ class ActionRunner:
                         and (mm.nearest_enemy is None)
                         and (not mm.minimap_visible or mm.health_ratio >= 0.65)
                     )
-                    indoor_wall = target_color == "yellow" and mm.yellow_route_bearing is None
                     steer_dx = (
                         int(round(max(-320.0, min(320.0, last_bearing * max(steer_gain * 1.5, 240.0)))))
                         if off_axis
                         else 0
                     )
-                    back_up_s = 0.25 if (off_axis or indoor_wall) else 0.0
+                    back_up_s = 0.25
+                    tick_clock_0 = self._clock()
                     self._perform_on_foot_sidestep(
                         recovery_count,
                         last_bearing,
@@ -931,12 +932,20 @@ class ActionRunner:
                         steer_dx=steer_dx,
                         back_up_s=back_up_s,
                     )
+                    if not off_axis:
+                        # Hold wall-parallel heading briefly after sidestep so bearing doesn't immediately steer back into the wall.
+                        post_sidestep_t = state.elapsed_s + max(0.0, self._clock() - tick_clock_0)
+                        bypass_bearing_until_t = post_sidestep_t + 0.75
                     low_motion_elapsed_s = 0.0
                     prev_gray = None
                     last_motion_check_t = None
                     return None
 
-            if bearing is not None and abs(bearing) > deadband:
+            if (
+                bearing is not None
+                and abs(bearing) > deadband
+                and state.elapsed_s >= bypass_bearing_until_t
+            ):
                 dx = int(round(max(-240.0, min(240.0, bearing * steer_gain))))
                 if dx != 0:
                     self._steer_camera(dx, 0)

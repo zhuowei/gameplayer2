@@ -193,3 +193,32 @@ def test_follow_route_on_foot_wall_corner_unstick_backs_up_turns_without_vault(t
     assert world.player_y < 0.0 or res.stop_reason == "target_reached"
     assert world.held_keys == set()
     assert world.held_buttons == set()
+
+
+def test_follow_route_on_foot_indoor_wall_bypass_clears_doorway_to_target(tmp_path) -> None:
+    """Bug-algorithm bypass: when yellow blip is straight behind an indoor wall, sidestep + brief bypass clears the doorway."""
+    world = KinematicWorld(
+        player_x=0.0,
+        player_y=0.0,
+        yaw_deg=0.0,
+        health=0.95,
+        # Wall blocks straight path to (0.0, 5.5) with doorway open on the right (x > 1.35)
+        occluders=[BoxOccluder(x0=-3.0, y0=1.2, x1=1.35, y1=1.8)],
+        yellow_target=(0.0, 5.5),
+    )
+    runner, _clock, _input_backend, log_path = _make_sim_runner(world, tmp_path, "indoor_bypass", initial_time=700.0)
+    res = runner.follow_route_on_foot(
+        stuck_window_s=0.5,
+        unstuck_duration_s=0.65,
+        arrive_distance=0.10,
+        config=LoopConfig(max_duration_s=7.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+
+    assert res.stop_reason == "target_reached"
+    assert world.player_y > 2.2
+    logs = read_telemetry(log_path, tool="runner")
+    recs = [r for r in logs if r.get("action") == "on_foot_stuck_recovery"]
+    assert len(recs) >= 1
+    assert recs[0]["details"]["back_up_s"] == 0.25
+    assert world.held_keys == set()
+    assert world.held_buttons == set()
