@@ -4,12 +4,12 @@ Updated by `watcher` (and initialized by `toolsmith` in Phase 0).
 
 ## Current Run State
 
-- **Current Mission / Checkpoint**: Prologue — Shutter Room Cover (`$177,000` collected, active `player-5` session)
-- **Consecutive Failures**: `0` deaths on current checkpoint (`23m` Shutter Room stall `#308`/`#310`/`#311` addressed by Cycle 7)
-- **Minutes on Checkpoint**: `23` (`08:09–08:32Z` Shutter Room)
-- **LLM Turns per Checkpoint**: `12+`
-- **Minutes Since Last Commit**: `0` (Cycle 7 commit)
-- **Active Issues**: Live scoreboard snapshots written to gitignored `logs/status.json` (`gameplayer.status_store`); Cycle 7 adds `pitch_down_sign` vertical calibration, `level_camera_pitch()`, chest-high `enter_cover()` idempotency, close-range pivot, and `approach_and_enter_cover()`. `capture_daemon` active.
+- **Current Mission / Checkpoint**: Prologue — Shutter Charge -> Yard Shootout (`GoPostal` cover objective cleared `#337`, active `player-5` session)
+- **Consecutive Failures**: `0` deaths on current checkpoint
+- **Minutes on Checkpoint**: `0` (`#337` Shutter Room cover cleared at `01:33 PST`)
+- **LLM Turns per Checkpoint**: `1`
+- **Minutes Since Last Commit**: `0` (Cycle 10 commit)
+- **Active Issues**: Live scoreboard snapshots written to gitignored `logs/status.json` (`gameplayer.status_store`); Cycle 10 adds center-pillar `classify_posture` (`0.34..0.58`) and `wrong_prop_cover` exit-and-advance recovery. `capture_daemon` active.
 
 ## Self-Improvement Log
 
@@ -59,4 +59,5 @@ Updated by `watcher` (and initialized by `toolsmith` in Phase 0).
 | Checkpoint 3 (Cycle 7) | Shutter Room `23m` stall (`#308`/`#310`/`#311`): `+dy` pitched UP into ceiling (`pitch_down_sign=-1`), `enter_cover()` untoggled chest-high cover (`shift_score=19.1`), close-range orbiting. | `4925b9a`: Vertical `pitch_down_sign` in `calibrate_controls()`, sign-agnostic `level_camera_pitch()`, chest-high `classify_posture` (`rows 88..162`) + `shift_score >= 10` `enter_cover()` idempotency, close-range pivot + `"get in cover"` stop, and `approach_and_enter_cover()` / `prologue_shutter_cover()`. | `@verifier-3` PASS (`#314`, `116 passed`); merged & pushed (`#315`). |
 | Checkpoint 4 (Cycle 7b) | Live telemetry (`#317`): `14 * 0.225 < 4.0px` returned `level_camera_pitch: unresponsive` and `approach_and_enter_cover()` toggled `q` `38` times. | `79b292e`: Adaptive `probe_dy >= 24` from `_pitch_px_per_dy`, `0.09s` calibration settle, pre-cover bearing alignment, and non-untoggling `"a"`/`"d"` cover slides. | `@verifier-3` PASS (`#319`, `117 passed`); `calibrate_controls()` & `target_reached` (`0.0456`) verified live (`#321`). |
 | Checkpoint 4 (Cycle 8) | Shutter cover tarp-blocked corner (`#321`, `q_after.png`) & intermittent `Notes(pid=6487)` focus theft (`#322`). | `eb21097`: Added `stop_on_focus_loss=True` (`"focus_lost"` early abort + `release_all`), crate-orbit probes (`"s"` + `"d"`/`"a"` + `"w"`) in `approach_and_enter_cover()`, & Checkpoint 4 retrospective docs. | `@verifier-3` PASS (`#327`, `119 passed`); caught live `Notes` `Fn+Q` loop (`#330`). |
-| Checkpoint 4 (Cycle 8b / 9) | `CGEventCreateKeyboardEvent` returned `0x20800000` (`kCGEventFlagMaskSecondaryFn`), turning `'q'` into macOS `Fn+Q` Quick Note (`Notes(pid=6487)` `#328`/`#330`), and interior red alarm wash faked `10` `"red"` enemy blips (`p5_exit_side2.png`, `#331`). | Cycle 8b + 9: Strip `kCGEventFlagMaskSecondaryFn | kCGEventFlagMaskNumericPad` in `CGEventInputBackend._clear_mod_mask` (only re-applied on arrows/fn via `_key_intrinsic_flags`), and tighten `minimap._color_masks["red"]` (`r >= 206`, `g/b <= 68`, `r - g/b >= 140`) to reject translucent alarm washes while preserving real yard blips. | Pending `@verifier-3` QA. |
+| Checkpoint 4 (Cycle 8b / 9) | `CGEventCreateKeyboardEvent` returned `0x20800000` (`kCGEventFlagMaskSecondaryFn`), turning `'q'` into macOS `Fn+Q` Quick Note (`Notes(pid=6487)` `#328`/`#330`), and interior red alarm wash faked `10` `"red"` enemy blips (`p5_exit_side2.png`, `#331`). | `645e456`: Strip `kCGEventFlagMaskSecondaryFn | kCGEventFlagMaskNumericPad` in `CGEventInputBackend._clear_mod_mask` (only re-applied on arrows/fn via `_key_intrinsic_flags`), and tighten `minimap._color_masks["red"]` (`r >= 206`, `g/b <= 68`, `r - g/b >= 140`) to reject translucent alarm washes while preserving real yard blips. | `@verifier-3` PASS (`#333`, `120 passed`); live `q` cover snaps & Shutter Room cleared (`#337`). |
+| Checkpoint 5 (Cycle 10) | Narrow center pillar cover (`0.34..0.58`) missed by `classify_posture`, and wrong-prop `q` cover snap while `yellow > 0.08` away (`clips/check_0928.mp4`, `#335`). | Cycle 10: Add center-pillar `(0.34..0.58)` cover band & `"unknown"` lower-half fallback in `classify_posture()`, add `wrong_prop_cover` exit-and-advance recovery to `approach_and_enter_cover()`, and append Checkpoint 5 retrospective. | Pending `@verifier-3` QA. |

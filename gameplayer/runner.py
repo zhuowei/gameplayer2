@@ -1262,14 +1262,13 @@ class ActionRunner:
 
         def _is_cover_confirmed(mm: MinimapObservation, posture: PostureStatus) -> bool:
             target, _ = self._resolve_route_target_and_bearing(mm, target_color)
-            if posture.state == "in_cover" and posture.confidence >= 0.60:
-                return True
-            if self._in_cover_hint is True and (target is None or target.distance > max(arrive_distance * 2.5, 0.22)):
-                return True
             if target is None or target.distance > max(arrive_distance * 2.5, 0.22):
                 return True
             if len(mm.targets.get("red", ())) > 0 and target is None:
                 return True
+            if target.distance <= 0.08:
+                if posture.state == "in_cover" and posture.confidence >= 0.60:
+                    return True
             return False
 
         cover_slide_idx = 0
@@ -1321,6 +1320,47 @@ class ActionRunner:
                     break
 
                 rem_t = max(0.05, cfg.max_duration_s - (self._clock() - start_t) - 0.3)
+                cur_target, _ = self._resolve_route_target_and_bearing(mm, target_color)
+                snapped_cover = (
+                    (self._in_cover_hint is True)
+                    or (posture.state == "in_cover" and posture.confidence >= 0.60)
+                )
+                if snapped_cover and cur_target is not None and cur_target.distance > 0.08:
+                    # Snapped to a wrong prop (e.g. side pillar) while objective remains > 0.08 away: exit & advance.
+                    self._logger.log(
+                        tool="runner",
+                        action="wrong_prop_cover",
+                        status="ok",
+                        details={"distance": round(cur_target.distance, 4), "bearing": round(cur_target.bearing, 3)},
+                    )
+                    self.exit_cover(force=True, settle_s=0.15)
+                    cover_slide_idx = 0
+                    adv_budget = max(0.5, min(6.0, cfg.max_duration_s - (self._clock() - start_t) - 0.3))
+                    adv_res = self.follow_route_on_foot(
+                        sprint=False,
+                        target_color=target_color,
+                        arrive_distance=min(arrive_distance, 0.075),
+                        stop_on_subtitle_keywords=("return to", "wait for", "stay with", "follow"),
+                        vault_on_stuck=False,
+                        cover_on_health_drop=True,
+                        level_pitch=False,
+                        config=LoopConfig(
+                            max_duration_s=adv_budget,
+                            hz=cfg.hz,
+                            hud_check_interval_s=cfg.hud_check_interval_s,
+                            health_drop_threshold=cfg.health_drop_threshold,
+                            stop_on_banner=cfg.stop_on_banner,
+                            stop_on_focus_loss=cfg.stop_on_focus_loss,
+                        ),
+                    )
+                    ticks += adv_res.ticks
+                    if adv_res.stop_reason in ("focus_lost",) or adv_res.stop_reason.startswith("banner:"):
+                        last_mm = adv_res.last_minimap
+                        last_hud = adv_res.last_hud
+                        stop_reason = adv_res.stop_reason
+                        break
+                    continue
+
                 if self._in_cover_hint is True and cover_slide_idx < 2:
                     # Already latched in cover: slide laterally along cover without untoggling `q`.
                     slide_key = "a" if cover_slide_idx == 0 else "d"

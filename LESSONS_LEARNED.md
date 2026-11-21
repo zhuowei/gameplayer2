@@ -134,3 +134,14 @@ Escalating deep perception and control failures to `Carbon` specialists produced
     1. **`q` (`0x0C`) verified valid vs blocked geometry**: `AppKit.NSEvent` confirmed `KEYCODES["q"] = 0x0C -> 'q'` with identical `0x20800000` flags as `w/a/s/d`. Live captures (`p5_c7b_step3.png`, `q_after.png`, `p5_test_q_pillar.png`, `p5_test_q_wall.png`) showed Trevor wedged behind a slanted grey tarp/chair on the back of the `B-K SHIPPING` crate (`yellow` blip `+79°` right at `bearing=+0.439`) or facing the unscripted back corridor `!` wall (`yellow` at `bearing=-0.923`), while local `w/a/d/s` micro-probes never backed out around the crate to the clear shutter-facing side.
     2. **Background focus preemption (`Notes(pid=6487)`)**: `CGEventCreateKeyboardEvent` on macOS returned `0x20800000` (setting `kCGEventFlagMaskSecondaryFn = 0x800000`), and `CGEventInputBackend._clear_mod_mask` did not strip `SecondaryFn`/`NumericPad` from normal keys — turning every `'q'` press into macOS `Fn+Q` (**Quick Note**, launching/focusing `Notes` and eating `'q'` before it reached `GTA5.exe`!).
   - **Cycle 8 + 8b Fixes**: Stripped `kCGEventFlagMaskSecondaryFn | kCGEventFlagMaskNumericPad` in `_clear_mod_mask` (explicitly re-applying them ONLY via `_key_intrinsic_flags` for arrows/fn keys), added `stop_on_focus_loss: bool = True` (`"focus_lost"` early abort + `release_all`), and upgraded `approach_and_enter_cover()` with crate/pillar orbit probes.
+
+---
+
+## 9. Checkpoint 5 (2026-11-21 01:32 PST)
+
+- **Progression & Telemetry (`645e456`, Cycle 10)**:
+  - **Root-Cause Verification (`645e456`, `120 passed`)**: Stripping `kCGEventFlagMaskSecondaryFn` (`0x800000`) immediately stopped `Fn+Q` Quick Note (`Notes(pid=6487)`) from stealing focus, enabled live `q` cover snaps (`shift_score=16.87..27.88`, `clips/check_0928.mp4`), eliminated false red minimap alarm blips (`p5_exit_side2.png`), and `player-5` cleared the Prologue Shutter Room cover objective at the `GoPostal` crate (`#337`, `captures/p5_brad_cover15.png`).
+  - **Remaining Friction (`clips/check_0928.mp4`, `#335`)**:
+    1. Trevor snapped into cover against a narrow center pillar (Michael's `EXIT` pillar) occupying `x=[0.34..0.58]`, which fell between `classify_posture`'s left (`0.18..0.36`) and right (`0.48..0.66`) bands and returned `"standing"`/`"unknown"`.
+    2. Snapping to a side prop while `yellow` remained `> 0.08` away triggered cover slides on the wrong prop instead of exiting cover (`q`) and advancing to `yellow`.
+  - **Cycle 10 Fixes**: Added center pillar band `(0.34..0.58)` (full + chest-high `88..162`) and lower-half `"unknown"` fallback (`c_ratio >= 0.96` or `cc_ratio >= 1.05`) in `classify_posture()`, and updated `approach_and_enter_cover()` to detect `wrong_prop_cover` (cover latched while `target.distance > max(arrive_distance, 0.08)`), call `exit_cover(force=True)`, and run `follow_route_on_foot` directly onto `yellow`.

@@ -548,3 +548,66 @@ def test_approach_and_enter_cover_orbits_blocked_face_to_clear_side(tmp_path) ->
     assert ("key_down", "s") in in_backend.events
     assert ("key_down", "d") in in_backend.events
     assert world.held_keys == set()
+
+
+def test_classify_posture_center_pillar_and_approach_wrong_prop_recovery(tmp_path) -> None:
+    """Cycle 10 (#335): center-pillar zone (0.34..0.58) detects in_cover, and wrong-prop cover exits & advances."""
+    from pathlib import Path
+
+    # 1) Narrow center pillar in [0.34..0.58] classifies as in_cover ("center")
+    center_img = Image.new("RGB", (640, 360), (95, 112, 134))
+    draw = ImageDraw.Draw(center_img)
+    draw.rectangle((0, 180, 640, 360), fill=(195, 206, 218))
+    for x in range(int(0.36 * 640), int(0.56 * 640), 10):
+        draw.rectangle((x, 12, x + 5, 348), fill=(68, 70, 74))
+        draw.rectangle((x + 5, 12, x + 10, 348), fill=(88, 90, 94))
+    st_center = classify_posture(center_img)
+    assert st_center.state == "in_cover"
+    assert st_center.cover_wall_side == "center"
+
+    live_center = Path("/Users/zhuowei/Documents/proj/gameplayer/captures/p5_brad_cover7.png")
+    if live_center.exists():
+        assert classify_posture(Image.open(live_center)).state == "in_cover"
+
+    # 2) Wrong-prop snap while yellow target remains at distance > 0.08 exits cover (`q`) and advances to yellow
+    # Frame 0..1: yellow at (0.50, 0.70) (distance = 0.091 > 0.08), frame 2: snapped wrong cover (high shift -> _in_cover_hint),
+    # then frame 3+: advances onto yellow (0.50, 0.74) (dist=0.039 <= 0.08) and clears yellow!
+    f_far = make_synthetic_minimap_frame(health_ratio=0.95, yellow_points=[(0.50, 0.69)])
+    ImageDraw.Draw(f_far).rectangle((220, 140, 420, 260), fill=(35, 35, 42))
+    f_wrong = make_synthetic_minimap_frame(health_ratio=0.95, yellow_points=[(0.50, 0.69)])
+    ImageDraw.Draw(f_wrong).rectangle((220, 140, 420, 260), fill=(215, 215, 220))
+    for x in range(120, 500, 40):
+        ImageDraw.Draw(f_far).rectangle((x, 40, x + 16, 120), fill=(48, 52, 60))
+        ImageDraw.Draw(f_wrong).rectangle((x, 40, x + 16, 120), fill=(48, 52, 60))
+    f_near = make_synthetic_minimap_frame(health_ratio=0.95, yellow_points=[(0.50, 0.74)])
+    f_cleared = make_synthetic_minimap_frame(health_ratio=0.95, yellow_points=[])
+
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    log_path = tmp_path / "wrong_prop.jsonl"
+    logger = TelemetryLogger(log_path)
+    ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
+    # Call order:
+    # 0..1: follow_route_on_foot (dist 0.104 > 0.085 -> wait: give 0.69 -> dist 0.104 > 0.085 -> timeout or reach on f_near)
+    # Use arrive_distance=0.11 so initial follow_route stops at tick 0 with target at 0.104 (> 0.08),
+    # tick 0 enter_cover snaps wrong prop (f_far -> f_wrong), sees wrong_prop_cover, exits q, walks onto f_cleared!
+    seq = [f_far, f_far, f_wrong, f_wrong, f_near, f_cleared, f_cleared]
+    idx_box = {"i": 0}
+
+    def _next_wp(_idx: int) -> Image.Image:
+        cur = seq[min(idx_box["i"], len(seq) - 1)]
+        idx_box["i"] += 1
+        return cur
+
+    runner = ActionRunner(ctrl, ReplayWindowBackend(_next_wp), ScriptedHudOCR(lambda _i: {}), logger, clock, clock.sleep)
+    res = runner.approach_and_enter_cover(
+        arrive_distance=0.11,
+        max_duration_s=5.0,
+        level_pitch=False,
+        config=LoopConfig(max_duration_s=5.0, hz=10.0, hud_check_interval_s=0.0),
+    )
+    assert res.stop_reason == "cover_entered"
+    logs = read_telemetry(log_path, tool="runner")
+    assert any(r.get("action") == "wrong_prop_cover" for r in logs)
+    assert any(r.get("action") == "exit_cover" for r in logs)
+    assert backend.currently_held_keys == set()
