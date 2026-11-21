@@ -446,7 +446,16 @@ class SimInputBackend:
         self.world.held_keys.add(key)
         self.events.append(("key_down", key))
         if key == "q":
-            self.world.in_cover = not self.world.in_cover
+            can_snap = True
+            if (
+                not self.world.in_cover
+                and self.world.cover_snap_radius_m is not None
+                and self.world.yellow_target is not None
+            ):
+                tx, ty = self.world.yellow_target
+                can_snap = math.hypot(tx - self.world.player_x, ty - self.world.player_y) <= self.world.cover_snap_radius_m
+            if can_snap:
+                self.world.in_cover = not self.world.in_cover
             if (
                 self.world.in_cover
                 and self.world.clear_yellow_on_cover_snap

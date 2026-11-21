@@ -133,6 +133,7 @@ class LoopConfig:
     stop_on_help_change: bool = True
     stop_on_subtitle_change: bool = False
     health_drop_threshold: Optional[float] = 0.15
+    stop_on_focus_loss: bool = True
 
 
 def _road_gray_sample(image: Image.Image) -> np.ndarray:
@@ -734,6 +735,16 @@ class ActionRunner:
                         wb = cap.window.bounds
                         if wb.width > 0 and wb.height > 0:
                             self.input.backend.set_anchor_bounds(wb.x, wb.y, wb.width, wb.height)
+                    if config.stop_on_focus_loss and not cap.window.is_frontmost:
+                        self._logger.log(
+                            tool="runner",
+                            action="focus_lost",
+                            status="ok",
+                            details={"mode": mode_name, "obstructed_by": list(cap.window.obstructed_by)},
+                        )
+                        stop_reason = "focus_lost"
+                        ticks += 1
+                        break
                     mm = inspect_minimap(cap.image, logger=self._logger)
                     last_minimap = mm
 
@@ -1261,14 +1272,9 @@ class ActionRunner:
                 return True
             return False
 
-        probe_sequence = (
-            ("w", probe_step_s),
-            ("a", probe_step_s),
-            ("d", probe_step_s * 1.4),
-            ("s", probe_step_s),
-        )
         cover_slide_idx = 0
         probe_idx = 0
+        orbit_pref_dir: Optional[str] = None
         try:
             # Align toward off-axis cover blip before first `q` attempt so Trevor faces the cover object.
             if last_mm is not None:
@@ -1295,6 +1301,15 @@ class ActionRunner:
                 last_hud = hud
                 ticks += 1
 
+                if cfg.stop_on_focus_loss and not cap.window.is_frontmost:
+                    self._logger.log(
+                        tool="runner",
+                        action="focus_lost",
+                        status="ok",
+                        details={"mode": "approach_and_enter_cover", "obstructed_by": list(cap.window.obstructed_by)},
+                    )
+                    stop_reason = "focus_lost"
+                    break
                 if cfg.stop_on_banner and hud.banner is not None:
                     stop_reason = f"banner:{hud.banner}"
                     break
@@ -1322,18 +1337,54 @@ class ActionRunner:
                     self.exit_cover(force=True, settle_s=0.15)
                     cover_slide_idx = 0
 
-                _, bearing = self._resolve_route_target_and_bearing(mm, target_color)
-                if bearing is not None and abs(bearing) > 0.15:
-                    dx = int(round(max(-220.0, min(220.0, bearing * 180.0))))
-                    if dx != 0:
-                        self._steer_camera(dx, 0)
-                step_key, step_dur = probe_sequence[probe_idx % len(probe_sequence)]
-                probe_idx += 1
-                self.input.key_down(step_key)
-                try:
-                    self._sleep_chunked(min(step_dur, rem_t))
-                finally:
-                    self.input.key_up(step_key)
+                if probe_idx < 2:
+                    _, bearing = self._resolve_route_target_and_bearing(mm, target_color)
+                    if bearing is not None and abs(bearing) > 0.15:
+                        dx = int(round(max(-220.0, min(220.0, bearing * 180.0))))
+                        if dx != 0:
+                            self._steer_camera(dx, 0)
+                    if probe_idx == 0:
+                        step_key, step_dur = "w", probe_step_s
+                    else:
+                        step_key = "a" if (bearing is not None and bearing < 0.0) else "d"
+                        step_dur = probe_step_s
+                    probe_idx += 1
+                    self.input.key_down(step_key)
+                    try:
+                        self._sleep_chunked(min(step_dur, rem_t))
+                    finally:
+                        self.input.key_up(step_key)
+                else:
+                    # Local face blocked (e.g. prop leaning on crate): commit 2 orbit steps per side before flipping.
+                    if orbit_pref_dir is None:
+                        _, b_now = self._resolve_route_target_and_bearing(mm, target_color)
+                        orbit_pref_dir = "a" if (b_now is not None and b_now < 0.0) else "d"
+                    alt_dir = "d" if orbit_pref_dir == "a" else "a"
+                    orbit_dir = orbit_pref_dir if (((probe_idx - 2) // 2) % 2 == 0) else alt_dir
+                    probe_idx += 1
+                    for o_key, o_dur in (("s", 0.30), (orbit_dir, 0.55)):
+                        rem_now = max(0.0, cfg.max_duration_s - (self._clock() - start_t) - 0.25)
+                        if rem_now <= 0.05:
+                            break
+                        self.input.key_down(o_key)
+                        try:
+                            self._sleep_chunked(min(o_dur, rem_now))
+                        finally:
+                            self.input.key_up(o_key)
+                    cap_mid = capture_game_window(backend=self._window_backend, logger=self._logger, require_16_9=True)
+                    mm_mid = inspect_minimap(cap_mid.image, logger=self._logger)
+                    _, bearing_mid = self._resolve_route_target_and_bearing(mm_mid, target_color)
+                    if bearing_mid is not None and abs(bearing_mid) > 0.10:
+                        dx_mid = int(round(max(-240.0, min(240.0, bearing_mid * 180.0))))
+                        if dx_mid != 0:
+                            self._steer_camera(dx_mid, 0)
+                    rem_fwd = max(0.0, cfg.max_duration_s - (self._clock() - start_t) - 0.25)
+                    if rem_fwd > 0.05:
+                        self.input.key_down("w")
+                        try:
+                            self._sleep_chunked(min(0.75, rem_fwd))
+                        finally:
+                            self.input.key_up("w")
         finally:
             self.input.release_all(reason=f"runner:approach_and_enter_cover:{stop_reason}", suppress_errors=True)
 

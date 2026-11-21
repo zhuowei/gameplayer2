@@ -473,3 +473,78 @@ def test_level_camera_pitch_adapts_probe_to_low_calibrated_gain_and_cover_slides
     assert ("key_down", "a") in backend2.events
     assert ("key_down", "d") in backend2.events
     assert backend2.currently_held_keys == set()
+
+
+def test_run_loop_stops_and_releases_on_focus_loss(tmp_path) -> None:
+    """Cycle 8 (#322): background app focus theft (e.g. Notes) aborts loops as 'focus_lost' and releases all keys."""
+    from gameplayer.window import WindowBounds, WindowInfo
+
+    class _FocusLostWindowBackend:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def list_windows(self) -> list[WindowInfo]:
+            self.calls += 1
+            front = self.calls <= 2
+            obs = () if front else ("Notes(pid=6487,wid=44)",)
+            return [
+                WindowInfo(
+                    window_id=135,
+                    owner="GTA5.exe",
+                    title="Grand Theft Auto V",
+                    pid=1212,
+                    bounds=WindowBounds(0, 0, 1280, 720),
+                    layer=0,
+                    is_onscreen=True,
+                    is_frontmost=front,
+                    obstructed_by=obs,
+                )
+            ]
+
+        def capture_window_image(self, _wid: int) -> Image.Image:
+            return make_synthetic_minimap_frame(yellow_points=[(0.50, 0.35)])
+
+        def focus_window(self, _win: WindowInfo) -> bool:
+            return True
+
+    clock = FakeClock()
+    backend = RecordingInputBackend()
+    log_path = tmp_path / "focus_loss.jsonl"
+    logger = TelemetryLogger(log_path)
+    ctrl = InputController(backend=backend, logger=logger, clock=clock, sleep_fn=clock.sleep, register_signals=False)
+    runner = ActionRunner(ctrl, _FocusLostWindowBackend(), ScriptedHudOCR(lambda _i: {}), logger, clock, clock.sleep)
+    res = runner.follow_route_on_foot(config=LoopConfig(max_duration_s=3.0, hz=10.0, hud_check_interval_s=0.0))
+    assert res.stop_reason == "focus_lost"
+    assert backend.currently_held_keys == set()
+    assert backend.currently_held_buttons == set()
+    assert any(r.get("action") == "focus_lost" for r in read_telemetry(log_path, tool="runner"))
+
+
+def test_approach_and_enter_cover_orbits_blocked_face_to_clear_side(tmp_path) -> None:
+    """Cycle 8 (#321/#322): when close local probes fail behind a blocked prop face, back-out + orbit reaches clear side."""
+    # Player starts directly south of a crate (y in [1.2, 2.2]), yellow cover spot is on the east side (2.0, 2.0)
+    # within snap radius 1.4m, so initial south-face q cannot reach (2.0, 2.0) until orbiting right ('d').
+    world = KinematicWorld(
+        player_x=0.0,
+        player_y=0.0,
+        yaw_deg=0.0,
+        pitch_deg=0.0,
+        health=0.95,
+        occluders=[BoxOccluder(x0=-1.0, y0=1.2, x1=1.0, y1=2.6)],
+        yellow_target=(1.8, 2.0),
+        cover_snap_radius_m=1.25,
+        clear_yellow_on_cover_snap=True,
+    )
+    runner, _, in_backend, _ = _make_sim_runner(world, tmp_path, "orbit_cover", initial_time=1500.0)
+    res = runner.approach_and_enter_cover(
+        arrive_distance=0.09,
+        max_duration_s=14.0,
+        level_pitch=False,
+        config=LoopConfig(max_duration_s=14.0, hz=10.0, hud_check_interval_s=0.0),
+    )
+    assert res.stop_reason == "cover_entered"
+    assert world.in_cover is True
+    assert world.yellow_target is None
+    assert ("key_down", "s") in in_backend.events
+    assert ("key_down", "d") in in_backend.events
+    assert world.held_keys == set()

@@ -123,3 +123,14 @@ Escalating deep perception and control failures to `Carbon` specialists produced
     2. **`enter_cover()` untoggled chest-high cover**: `08:28:03Z` produced `shift_score=19.1` (entering chest-high counter cover), but `classify_posture()` only scanned full-height rows `27..153` and returned `"standing"`, causing subsequent `enter_cover()` calls to toggle Trevor back out (`shift_score=6.51, 7.22`).
     3. **Close-range orbiting & missing cover-objective loop**: `follow_route_on_foot` kept `"w"` held while turning `dist < 0.20` (`orbiting`) and had no closed-loop `approach_and_enter_cover()` / `"get in cover"` stop.
   - **Cycle 7 Fixes**: Added lower chest-high cover detection (`rows 88..162`) + ambiguous `"unknown"` band (`0.96..1.15`), latched `_in_cover_hint = True` on `shift_score >= 10.0` so `enter_cover()` never untoggles cover, added vertical `pitch_down_sign` calibration to `calibrate_controls()` (`logs/calibration.json`), added sign-agnostic `level_camera_pitch()` with confidence-gated clamp checks, added close-range pivot + `"get in cover"` stop to `follow_route_on_foot`, and added `ActionRunner.approach_and_enter_cover()` / `prologue_shutter_cover()`.
+
+---
+
+## 8. Checkpoint 4 (2026-11-21 01:02 PST)
+
+- **Progression & Telemetry (`4925b9a`, `79b292e`, Cycle 8)**:
+  - **Cycle 7b (`79b292e`, `#317`, `117 passed`)**: Live `calibrate_controls()` measured `pitch_down_sign=1`, `pitch_px_per_dy=0.348`, `hipfire_px_per_dx=0.206`, `warning=None`, and `follow_route_on_foot` hit `target_reached` (`distance=0.0456`, `captures/p5_c7b_step3.png`). Adaptive `probe_dy` (`>= 24`, scaled from `_pitch_px_per_dy`) fixed `level_camera_pitch`'s `14 * 0.225 < 4.0px` false `"unresponsive"`, and `approach_and_enter_cover()` added pre-cover bearing alignment + non-untoggling `"a"`/`"d"` cover slides.
+  - **Root Causes in `#321` Shutter Room Cover Blocker**:
+    1. **`q` (`0x0C`) verified valid vs blocked geometry**: `AppKit.NSEvent` confirmed `KEYCODES["q"] = 0x0C -> 'q'` with identical `0x20800000` flags as `w/a/s/d`. Live captures (`p5_c7b_step3.png`, `q_after.png`, `p5_test_q_pillar.png`, `p5_test_q_wall.png`) showed Trevor wedged behind a slanted grey tarp/chair on the back of the `B-K SHIPPING` crate (`yellow` blip `+79°` right at `bearing=+0.439`) or facing the unscripted back corridor `!` wall (`yellow` at `bearing=-0.923`), while local `w/a/d/s` micro-probes never backed out around the crate to the clear shutter-facing side.
+    2. **Background focus preemption (`Notes(pid=6487)`)**: Focus theft mid-loop was undetected, risking dropped/misdirected inputs until the loop timed out.
+  - **Cycle 8 Fixes**: Added `stop_on_focus_loss: bool = True` (`"focus_lost"` early abort + `release_all` in `_run_loop` and `approach_and_enter_cover`), and upgraded `approach_and_enter_cover()` with back-out + lateral crate/pillar orbit probes (`"s"` + `"d"`/`"a"` + re-steer + `"w"`) when local face probes fail.
