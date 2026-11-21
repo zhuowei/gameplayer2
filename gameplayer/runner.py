@@ -296,6 +296,7 @@ class ActionRunner:
         self._in_cover_hint: Optional[bool] = None
         self._pitch_down_sign: Optional[int] = None
         self._pitch_px_per_dy: Optional[float] = None
+        self._last_flank_streak: int = 0
 
     def _get_human_detector(self) -> Optional[HumanDetectorBackend]:
         if not self._enable_visual_targeting:
@@ -361,7 +362,13 @@ class ActionRunner:
             roi = (0.15, 0.20, 0.88, 0.76)
 
         candidates = detector.detect_humans(image, roi=roi)
-        return select_visual_enemy_target(candidates, minimap, preferred_enemy=preferred_enemy)
+        selected = select_visual_enemy_target(candidates, minimap, preferred_enemy=preferred_enemy)
+        if selected is None and isinstance(detector, VisionHumanDetectorBackend):
+            hood_roi: tuple[float, float, float, float] = (0.22, 0.25, 0.88, 0.58)
+            if roi != hood_roi:
+                hood_cands = detector.detect_humans(image, roi=hood_roi)
+                selected = select_visual_enemy_target(hood_cands, minimap, preferred_enemy=preferred_enemy)
+        return selected
 
     def _handle_visual_aligned_tick(
         self,
@@ -1578,7 +1585,7 @@ class ActionRunner:
         target_idx = 0
         no_lock_ticks = 0
         engage_red_hits = 0
-        blocked_flank_streak = 0
+        blocked_flank_streak = self._last_flank_streak
         visual_suppressed_until_t = 0.0
         cam_fb = _CameraFeedback(enabled=self._enable_camera_motion_tracking)
 
@@ -1885,6 +1892,7 @@ class ActionRunner:
                 if (
                     phase == "engage"
                     and hold_engage_threat
+                    and engage_red_hits > 0
                     and now_t >= phase_end_t
                     and (now_t - engage_start_t) < max_engage_hold_s
                 ):
@@ -1903,12 +1911,14 @@ class ActionRunner:
                         no_lock_ticks = 0
                         if engage_red_hits > 0:
                             blocked_flank_streak = 0
+                            self._last_flank_streak = 0
                             recovery_count += 1
                             self._perform_on_foot_sidestep(recovery_count, enemy.bearing, 0.35, False)
                             _enter_engage_phase()
                             return None
-                        # Zero red_reticle locks across engage window (e.g. blocked behind Bobcat truck/wall): commit 4 streaks per side around obstacle.
+                        # Zero red_reticle locks across engage window (e.g. blocked behind SUV/pillar): commit 4 streaks per side around wide obstacle.
                         blocked_flank_streak += 1
+                        self._last_flank_streak = blocked_flank_streak
                         flank_key = "d" if ((blocked_flank_streak - 1) // 4) % 2 == 0 else "a"
                         self._logger.log(
                             tool="runner",
@@ -1923,13 +1933,13 @@ class ActionRunner:
                             self.input.key_up("s")
                         self.input.key_down(flank_key)
                         try:
-                            self._sleep_chunked(0.55)
+                            self._sleep_chunked(0.85)
                         finally:
                             self.input.key_up(flank_key)
                         if abs(enemy.bearing) > 0.30:
                             self._steer_camera(-45 if flank_key == "a" else 45, 0)
                         post_flank_t = _elapsed_now()
-                        flank_move_s = min(move_phase_s, 0.65)
+                        flank_move_s = min(move_phase_s, 0.85)
                         flank_unblock_until_t = post_flank_t + flank_move_s
                         phase = "move"
                         phase_end_t = flank_unblock_until_t
@@ -1961,6 +1971,7 @@ class ActionRunner:
                     no_lock_ticks = 0
                     engage_red_hits += 1
                     blocked_flank_streak = 0
+                    self._last_flank_streak = 0
                     visual_suppressed_until_t = 0.0
                     self._fire_bursts("left", bursts=3, hold_s=0.03, gap_s=0.025, reason="red_reticle")
                     cam_fb.fired_last_tick = True
@@ -2035,7 +2046,16 @@ class ActionRunner:
                         return None
                     if abs(enemy.bearing) <= engage_align_bearing:
                         aligned_ticks += 1
-                        if no_lock_ticks in (6, 12):
+                        if engage_red_hits == 0:
+                            # Blind probe without Vision or red_reticle hits: conserve ammo with a single 1-burst probe at tick 8.
+                            if no_lock_ticks == 8:
+                                self._fire_bursts("left", bursts=1, hold_s=0.03, gap_s=0.03, reason="suppressive")
+                                cam_fb.fired_last_tick = True
+                                if recoil_comp_dy > 0:
+                                    comp_dy = int(recoil_comp_dy)
+                                    self.input.mouse_delta(0, comp_dy, steps=1, duration_s=0.01)
+                                    cam_fb.last_cmd_dy = comp_dy
+                        elif no_lock_ticks in (6, 12):
                             self._fire_bursts("left", bursts=2, hold_s=0.03, gap_s=0.03, reason="suppressive")
                             cam_fb.fired_last_tick = True
                             if recoil_comp_dy > 0:
@@ -3011,7 +3031,7 @@ class ActionRunner:
                     if abs(enemy.bearing) <= suppressive_max_bearing:
                         aligned_ticks += 1
                         if no_lock_ticks in (6, 12):
-                            self._fire_bursts(fire_button, bursts=2, hold_s=0.03, gap_s=0.03, reason="suppressive")
+                            self._fire_bursts(fire_button, bursts=1, hold_s=0.03, gap_s=0.03, reason="suppressive")
                             cam_fb.fired_last_tick = True
                             if recoil_comp_dy > 0:
                                 sup_scale = 1 if no_lock_ticks == 6 else 2

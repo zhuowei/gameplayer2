@@ -157,3 +157,14 @@ Escalating deep perception and control failures to `Carbon` specialists produced
     2. `VisionHumanDetectorBackend` also locked onto closer occluding ally **Brad** (`[0.483, 0.544]`) when `red` cops lay behind him on the same bearing (`min_red <= 0.16` bypassed ally filtering), and lower-horizon floor artifacts (`ay > 0.57`).
     3. `advance_under_fire` aborted `"low_health"` (`0.247` HP at `09:57:47Z`) exposed without snapping `q` cover during the turn gap (`cover_on_low_health`).
   - **Cycle 12 Fixes**: Removed `_silhouette_fallback` inside `_detect_visual_target` when using `VisionHumanDetectorBackend` (keeping `SilhouetteHumanDetectorBackend` for explicit injection/offline tests with strict thin-edge/top-pillar filtering), added closer-ally occlusion + `ay <= 0.57` horizon filters in `select_visual_enemy_target()`, yielded persistent visual misses (`aligned_ticks >= 5` with `0` `red_reticle`) back to `DEFAULT_RETICLE_SWEEP` (`visual_suppressed_until_t`), and added `cover_on_low_health=True` to `advance_under_fire`.
+
+---
+
+## 11. Checkpoint 7 (2026-11-21 02:32 PST)
+
+- **Progression & Telemetry (`c48b247`, Cycle 13)**:
+  - **Milestone (`#352`, `#355`)**: `player-5` cleared the entire Yard wave (`red_count: 0`), pushed past the North Yankton gate with Michael & Brad, cleared a roadblock wave (`cover_peek_combat`: `enemies_cleared` at `10:29:50Z`), and `cover_on_low_health=True` saved Trevor live at `0.247` HP (`10:29:12Z`).
+  - **Root Causes at Snowy Barn Roadblock (`clips/check_1026.mp4`, `#358`, `#359`)**:
+    1. Crouched/hood-peeking cops behind white Police SUV roadblocks were missed by the full-height Vision ROI (`0.20..0.76`), while blind minimap bearing fired `2`-burst suppressive rounds into the SUV steel door (`67` bursts, `3/70` = `4.3%` `red_reticle`, depleting rifle reserve to `12 | 21`).
+    2. `hold_engage_threat` doubled engage hold (`3.2s -> 6.5s`) even with `0` `red_reticle` hits, and `advance_flank_unblock` (`0.55s` `'d'` + `0.65s` `'w'`) failed to clear wide `~3m` SUVs and reset `blocked_flank_streak` across `advance_under_fire` timeouts.
+  - **Cycle 13 Fixes**: Added hood-height `VisionHumanDetectorBackend` fallback ROI `(0.22, 0.25, 0.88, 0.58)` when primary ROI yields `None`; cut blind suppressive bursts when `engage_red_hits == 0` and `visual is None` to a single `1`-burst probe (`no_lock_ticks == 8` in `advance_under_fire`, `bursts=1` in `cover_peek_combat`) and skipped `hold_engage_threat` extension when `engage_red_hits == 0`; widened `advance_flank_unblock` to `0.85s` lateral strafe + `0.85s` forward clearance and persisted `self._last_flank_streak` across `advance_under_fire` calls.

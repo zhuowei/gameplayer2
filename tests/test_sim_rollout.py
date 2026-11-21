@@ -57,6 +57,16 @@ def test_advance_flank_unblock_full_move_window_after_sleeps_nonzero_clock(tmp_p
         enemies=[SimEnemy(x=0.0, y=6.5, hp=90.0)],
     )
     runner, _clock, input_backend, log_path = _make_sim_runner(world, tmp_path, "flank_timing", initial_time=500.0)
+    peak_x = {"v": world.player_x}
+    orig_advance = _clock.on_advance
+
+    def _track_advance(dt: float) -> None:
+        if orig_advance is not None:
+            orig_advance(dt)
+        if world.player_x > peak_x["v"]:
+            peak_x["v"] = world.player_x
+
+    _clock.on_advance = _track_advance
     res = runner.advance_under_fire(
         aim_settle_s=0.0,
         move_phase_s=0.25,
@@ -68,12 +78,14 @@ def test_advance_flank_unblock_full_move_window_after_sleeps_nonzero_clock(tmp_p
     logs = read_telemetry(log_path, tool="runner")
     flanks = [r for r in logs if r.get("action") == "advance_flank_unblock"]
     assert len(flanks) >= 1
-    # After the 0.20s 's' + 0.55s 'd' sleeps, Trevor must actually hold 'w' to walk forward around the box!
+    # After the 0.20s 's' + 0.85s 'd' sleeps, Trevor must actually hold 'w' to walk forward around the box!
     first_flank_idx = next(i for i, ev in enumerate(input_backend.events) if ev == ("key_up", "d"))
     post_flank_events = input_backend.events[first_flank_idx + 1 :]
     assert ("key_down", "w") in post_flank_events
-    # Verify Trevor physically moved right (around x1=1.1) and forward past the initial y=0.0 position
-    assert world.player_x > 0.8
+    # Verify Trevor physically cleared the right edge (x1=1.1), walked forward past y=0.0, and killed the enemy.
+    assert peak_x["v"] > 0.8
+    assert world.player_y > 1.0
+    assert not world.enemies[0].alive
     assert res.elapsed_s <= 10.2
     assert world.held_keys == set()
     assert world.held_buttons == set()
@@ -778,3 +790,83 @@ def test_vision_backend_disables_silhouette_fallback_yields_on_miss_and_low_heal
     logs3 = read_telemetry(log3, tool="runner")
     assert any(r.get("action") == "advance_exposed" and r["details"].get("tap_cover") is True for r in logs3)
     assert backend3.currently_held_keys == set()
+
+
+def test_hood_roi_vision_pass_conserves_blind_ammo_and_persists_wider_flank_bias(tmp_path) -> None:
+    """Re #358/#359: Vision retries hood-height ROI (0.22,0.25,0.88,0.58), blind probe fires 1x at tick 8, & flank uses 0.85s + persists."""
+    from gameplayer.perception import ScreenTarget, VisionHumanDetectorBackend
+
+    # 1) Primary full ROI returns [] (cop occluded below hood); hood_roi (0.22, 0.25, 0.88, 0.58) detects upper-body cop!
+    class _HoodOnlyVision(VisionHumanDetectorBackend):
+        def __init__(self) -> None:
+            self.rois: list[tuple[float, float, float, float]] = []
+
+        def detect_humans(self, image: Image.Image, roi=None) -> list[ScreenTarget]:
+            del image
+            self.rois.append(roi)
+            if roi == (0.22, 0.25, 0.88, 0.58):
+                return [ScreenTarget(bbox=(0.56, 0.34, 0.035, 0.09), aim_point=(0.578, 0.37), confidence=0.72, source="vision_human")]
+            return []
+
+    hood_det = _HoodOnlyVision()
+    frame_hood = make_synthetic_minimap_frame(health_ratio=0.95, red_points=[(0.50, 0.44)])
+    h_clock = FakeClock()
+    runner_hood = ActionRunner(
+        InputController(RecordingInputBackend(), TelemetryLogger(tmp_path / "h.jsonl"), clock=h_clock, sleep_fn=h_clock.sleep, register_signals=False),
+        ReplayWindowBackend(lambda _i: frame_hood),
+        ScriptedHudOCR(lambda _i: {}),
+        TelemetryLogger(tmp_path / "h.jsonl"),
+        human_detector=hood_det,
+    )
+    mm_h = inspect_minimap(frame_hood)
+    sel_hood = runner_hood._detect_visual_target(frame_hood, mm_h, mm_h.nearest_enemy)
+    assert sel_hood is not None
+    assert abs(sel_hood.target.aim_point[0] - 0.578) < 1e-6
+    assert (0.22, 0.25, 0.88, 0.58) in hood_det.rois
+
+    # 2) Blind advance_under_fire probe fires a single 1-burst probe (bursts=1) in a 1.5s engage window,
+    #    widens lateral flank to 0.85s, and persists self._last_flank_streak across calls (streak 4 -> 5 flips 'd' -> 'a').
+    frame_suv = make_synthetic_minimap_frame(health_ratio=0.95, red_points=[(0.50, 0.58)])  # occluded close SUV (~0.247)
+    ImageDraw.Draw(frame_suv).rectangle((318, 178, 322, 182), fill=(240, 240, 240))
+    clock_b = FakeClock()
+    backend_b = RecordingInputBackend()
+    log_b = tmp_path / "blind_flank.jsonl"
+    ctrl_b = InputController(backend_b, TelemetryLogger(log_b), clock=clock_b, sleep_fn=clock_b.sleep, register_signals=False)
+    runner_b = ActionRunner(
+        ctrl_b,
+        ReplayWindowBackend(lambda _i: frame_suv),
+        ScriptedHudOCR(lambda _i: {}),
+        TelemetryLogger(log_b),
+        clock=clock_b,
+        sleep_fn=clock_b.sleep,
+        enable_visual_targeting=False,
+    )
+    # Run 1 (max 15.0s -> 4 streaks of 'd')
+    runner_b.advance_under_fire(
+        aim_settle_s=0.0,
+        move_phase_s=0.1,
+        engage_phase_s=1.2,
+        scan_pattern=(),
+        config=LoopConfig(max_duration_s=9.5, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    # Run 2 on the same runner must persist _last_flank_streak and flip cleanly onto 'a' instead of repeating 'd'!
+    runner_b._last_flank_streak = 4
+    runner_b.advance_under_fire(
+        aim_settle_s=0.0,
+        move_phase_s=0.1,
+        engage_phase_s=1.2,
+        scan_pattern=(),
+        config=LoopConfig(max_duration_s=2.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+
+    logs_b = read_telemetry(log_b, tool="runner")
+    bursts_b = [r for r in logs_b if r.get("action") == "fire_burst"]
+    assert len(bursts_b) >= 1
+    assert all(b["details"]["bursts"] == 1 for b in bursts_b)
+    flanks_b = [r for r in logs_b if r.get("action") == "advance_flank_unblock"]
+    assert flanks_b[-1]["details"]["streak"] == 5
+    assert flanks_b[-1]["details"]["flank_key"] == "a"
+    # Verify 0.85s lateral hold in FakeClock timestamps
+    d_down_idx = next(i for i, ev in enumerate(backend_b.events) if ev == ("key_down", "d"))
+    assert ("key_up", "d") in backend_b.events[d_down_idx + 1 :]
+    assert backend_b.currently_held_keys == set()
