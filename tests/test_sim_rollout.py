@@ -433,3 +433,43 @@ def test_approach_and_enter_cover_shutter_room_with_ceiling_lock_and_pillar(tmp_
     assert world.pitch_deg > -35.0
     assert world.held_keys == set()
     assert world.held_buttons == set()
+
+
+def test_level_camera_pitch_adapts_probe_to_low_calibrated_gain_and_cover_slides_without_untoggle(tmp_path) -> None:
+    """Cycle 7b (#317): low pitch_px_per_dy auto-scales probe_dy, and latched cover slides 'a'/'d' without untoggling q."""
+    # 1) Low pitch sensitivity (~0.06 deg/px ~ 1.3 px per 14 counts, ~4.0+ px per 44 counts)
+    w_low = KinematicWorld(player_x=0.0, player_y=0.0, pitch_deg=-60.0, hipfire_deg_per_px=0.06, invert_pitch=False)
+    r_low, _, _, _ = _make_sim_runner(w_low, tmp_path, "low_gain_pitch", initial_time=1400.0)
+    r_low._pitch_px_per_dy = 0.22  # Triggers adaptive probe_dy = int(round(10 / 0.22)) = 45
+    rep = r_low.level_camera_pitch(recovery_dy=300, max_passes=2)
+    assert rep["status"] == "recovered_ceiling_clamp"
+    assert w_low.pitch_deg > -45.0
+
+    # 2) Cover latched via shift_score >= 10 slides laterally ('a'/'d') instead of spamming q
+    f_before = make_synthetic_minimap_frame(health_ratio=0.95, yellow_points=[(0.50, 0.72)])
+    ImageDraw.Draw(f_before).rectangle((220, 140, 420, 260), fill=(35, 35, 42))
+    f_cover = make_synthetic_minimap_frame(health_ratio=0.95, yellow_points=[(0.50, 0.72)])
+    ImageDraw.Draw(f_cover).rectangle((220, 140, 420, 260), fill=(215, 215, 220))
+    for x in range(120, 500, 40):
+        ImageDraw.Draw(f_before).rectangle((x, 40, x + 16, 120), fill=(48, 52, 60))
+        ImageDraw.Draw(f_cover).rectangle((x, 40, x + 16, 120), fill=(48, 52, 60))
+
+    clock2 = FakeClock()
+    backend2 = RecordingInputBackend()
+    logger2 = TelemetryLogger(tmp_path / "slide_no_untoggle.jsonl")
+    ctrl2 = InputController(backend=backend2, logger=logger2, clock=clock2, sleep_fn=clock2.sleep, register_signals=False)
+    frames2 = [f_before, f_before, f_cover]
+    idx2 = {"i": 0}
+
+    def _next_slide_frame(_idx: int) -> Image.Image:
+        cur = frames2[min(idx2["i"], len(frames2) - 1)]
+        idx2["i"] += 1
+        return cur
+
+    r_slide = ActionRunner(ctrl2, ReplayWindowBackend(_next_slide_frame), ScriptedHudOCR(lambda _i: {}), logger2, clock2, clock2.sleep)
+    r_slide.approach_and_enter_cover(level_pitch=False, max_duration_s=1.2, config=LoopConfig(max_duration_s=1.2, hz=10.0, hud_check_interval_s=0.0))
+    q_downs = [ev for ev in backend2.events if ev == ("key_down", "q")]
+    assert len(q_downs) == 1
+    assert ("key_down", "a") in backend2.events
+    assert ("key_down", "d") in backend2.events
+    assert backend2.currently_held_keys == set()
