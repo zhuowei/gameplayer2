@@ -249,3 +249,35 @@ def test_minimap_splits_nearby_red_and_blue_blips_without_merging(tmp_path) -> N
     assert bearings[0] < -0.02
     assert abs(bearings[1]) < 0.02
     assert bearings[2] > 0.02
+
+
+def test_minimap_rejects_translucent_interior_red_alarm_wash(tmp_path) -> None:
+    """Cycle 9 (#331): reject translucent interior red bank-alarm washes (r<=204) while keeping real enemy blips."""
+    from pathlib import Path
+
+    frame = make_synthetic_minimap_frame(health_ratio=1.0, red_points=[(0.65, 0.40)])
+    w, h = frame.size
+    rx0 = int(round(MINIMAP_RADAR_BOX[0] * w))
+    ry0 = int(round(MINIMAP_RADAR_BOX[1] * h))
+    rw = int(round((MINIMAP_RADAR_BOX[2] - MINIMAP_RADAR_BOX[0]) * w))
+    rh = int(round((MINIMAP_RADAR_BOX[3] - MINIMAP_RADAR_BOX[1]) * h))
+    draw = ImageDraw.Draw(frame)
+    # Paint translucent dim interior red alarm washes (r=186..202, g=b=45) that used to fake 10 enemy blips
+    draw.rectangle((rx0 + int(0.15 * rw), ry0 + int(0.20 * rh), rx0 + int(0.35 * rw), ry0 + int(0.45 * rh)), fill=(192, 46, 46))
+    draw.rectangle((rx0 + int(0.25 * rw), ry0 + int(0.60 * rh), rx0 + int(0.42 * rw), ry0 + int(0.80 * rh)), fill=(202, 50, 50))
+
+    obs = inspect_minimap(frame, logger=TelemetryLogger(tmp_path / "t_alarm.jsonl"))
+    assert len(obs.targets["red"]) == 1
+    assert obs.nearest_enemy is not None
+    assert obs.nearest_enemy.bearing > 0.05
+
+    live_alarm = Path("/Users/zhuowei/Documents/proj/gameplayer/captures/p5_exit_side2.png")
+    if live_alarm.exists():
+        obs_live = inspect_minimap(live_alarm, logger=TelemetryLogger(tmp_path / "t_alarm_live.jsonl"))
+        assert len(obs_live.targets["red"]) == 0
+        assert obs_live.nearest_enemy is None
+
+    yard_frame = Path("/Users/zhuowei/Documents/proj/gameplayer/captures/p3_heal_cover.png")
+    if yard_frame.exists():
+        obs_yard = inspect_minimap(yard_frame, logger=TelemetryLogger(tmp_path / "t_yard_live.jsonl"))
+        assert len(obs_yard.targets["red"]) >= 4

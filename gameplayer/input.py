@@ -275,6 +275,8 @@ class CGEventInputBackend:
             | Quartz.kCGEventFlagMaskControl
             | Quartz.kCGEventFlagMaskAlternate
             | Quartz.kCGEventFlagMaskCommand
+            | Quartz.kCGEventFlagMaskNumericPad
+            | Quartz.kCGEventFlagMaskSecondaryFn
         )
 
     def set_anchor_bounds(self, x: float, y: float, width: float, height: float) -> None:

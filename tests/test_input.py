@@ -427,8 +427,17 @@ def test_cgevent_backend_preserves_arrow_and_fn_key_flags(monkeypatch) -> None:
             pass
 
         def CGEventCreateKeyboardEvent(self, src, keycode, is_down):
-            # Simulate native Quartz non-modifier flag (0x20000000) + a stale host Shift bit (1 << 17)
-            return {"keycode": keycode, "down": is_down, "flags": 0x20000000 | self.kCGEventFlagMaskShift}
+            # Simulate native Quartz non-modifier flag (0x20000000) + stale host Shift, SecondaryFn (0x800000), & NumericPad bits
+            return {
+                "keycode": keycode,
+                "down": is_down,
+                "flags": (
+                    0x20000000
+                    | self.kCGEventFlagMaskShift
+                    | self.kCGEventFlagMaskSecondaryFn
+                    | self.kCGEventFlagMaskNumericPad
+                ),
+            }
 
         def CGEventGetFlags(self, ev):
             return ev["flags"]
@@ -447,6 +456,7 @@ def test_cgevent_backend_preserves_arrow_and_fn_key_flags(monkeypatch) -> None:
     backend.key_up("up")
     backend.key_down("f5")
     backend.key_down("w")
+    backend.key_down("q")
 
     expected_arrow = 0x20000000 | fake_q.kCGEventFlagMaskNumericPad | fake_q.kCGEventFlagMaskSecondaryFn
     assert fake_q.posted[0]["keycode"] == gp_input.KEYCODES["up"]
@@ -454,3 +464,5 @@ def test_cgevent_backend_preserves_arrow_and_fn_key_flags(monkeypatch) -> None:
     assert fake_q.posted[1]["flags"] == expected_arrow
     assert fake_q.posted[2]["flags"] == (0x20000000 | fake_q.kCGEventFlagMaskSecondaryFn)
     assert fake_q.posted[3]["flags"] == 0x20000000
+    assert fake_q.posted[4]["keycode"] == gp_input.KEYCODES["q"]
+    assert fake_q.posted[4]["flags"] == 0x20000000
