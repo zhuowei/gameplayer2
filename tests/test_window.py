@@ -6,6 +6,7 @@ from PIL import Image
 
 from gameplayer.telemetry import TelemetryLogger, read_telemetry
 from gameplayer.window import (
+    QuartzWindowBackend,
     WindowBounds,
     WindowCaptureError,
     WindowInfo,
@@ -211,3 +212,151 @@ def test_focus_game_window_warps_and_optionally_clicks_window_center(tmp_path) -
     recs = read_telemetry(tmp_path / "telemetry.jsonl", tool="window")
     assert recs[-1]["details"]["clicked_to_activate"] == "right"
     assert recs[-1]["details"]["cursor_warped_to"] == [740.0, 560.0]
+
+
+def test_focus_game_window_cycles_app_focus_before_activate_and_click(tmp_path) -> None:
+    class _CycleAwareBackend(MockWindowBackend):
+        def __init__(self, windows: list[WindowInfo], yield_pid: int | None = 505) -> None:
+            super().__init__(windows, {})
+            self._yield_pid = yield_pid
+            self.events: list[tuple[str, object]] = []
+
+        def yield_app_focus(self, exclude_pid: int, settle_s: float = 0.25) -> int | None:
+            self.events.append(("yield", (exclude_pid, settle_s)))
+            self._windows = [
+                WindowInfo(
+                    window_id=w.window_id,
+                    owner=w.owner,
+                    title=w.title,
+                    pid=w.pid,
+                    bounds=w.bounds,
+                    layer=w.layer,
+                    is_onscreen=w.is_onscreen,
+                    is_frontmost=False,
+                    obstructed_by=w.obstructed_by,
+                )
+                for w in self._windows
+            ]
+            return self._yield_pid
+
+        def focus_window(self, window: WindowInfo) -> bool:
+            self.events.append(("focus", window.window_id))
+            return super().focus_window(window)
+
+        def click_window_center(
+            self, window: WindowInfo, button: str = "right", hold_s: float = 0.04
+        ) -> tuple[float, float]:
+            self.events.append(("click", (window.bounds.center, button, hold_s)))
+            return window.bounds.center
+
+    win = WindowInfo(
+        window_id=135,
+        owner="GTA5.exe",
+        title="Grand Theft Auto V",
+        pid=1212,
+        bounds=WindowBounds(320.0, 180.0, 1280.0, 720.0),
+        is_frontmost=True,
+    )
+    backend = _CycleAwareBackend([win], yield_pid=505)
+    logger = TelemetryLogger(tmp_path / "telemetry.jsonl")
+
+    focused = focus_game_window(
+        backend=backend,
+        logger=logger,
+        allow_focus=True,
+        cycle_app_focus=True,
+        yield_settle_s=0.3,
+        click_to_activate=True,
+        activate_button="right",
+    )
+    assert focused.is_frontmost is True
+    assert backend.events == [
+        ("yield", (1212, 0.3)),
+        ("focus", 135),
+        ("click", ((960.0, 540.0), "right", 0.04)),
+    ]
+    recs = read_telemetry(tmp_path / "telemetry.jsonl", tool="window")
+    assert recs[-1]["details"]["cycled_app_focus"] is True
+    assert recs[-1]["details"]["yielded_to_pid"] == 505
+
+    no_target_backend = _CycleAwareBackend([win], yield_pid=None)
+    focus_game_window(
+        backend=no_target_backend,
+        logger=logger,
+        allow_focus=True,
+        cycle_app_focus=True,
+    )
+    recs = read_telemetry(tmp_path / "telemetry.jsonl", tool="window")
+    assert recs[-1]["details"]["cycled_app_focus"] is False
+    assert "yielded_to_pid" not in recs[-1]["details"]
+
+    plain_backend = MockWindowBackend([win], {})
+    focus_game_window(
+        backend=plain_backend,
+        logger=logger,
+        allow_focus=True,
+        cycle_app_focus=True,
+    )
+    recs = read_telemetry(tmp_path / "telemetry.jsonl", tool="window")
+    assert recs[-1]["details"]["cycled_app_focus"] is False
+
+
+def test_quartz_yield_app_focus_prefers_finder_with_mocked_appkit() -> None:
+    class _FakeApp:
+        def __init__(self, pid: int, bundle_id: str, policy: int = 0) -> None:
+            self._pid = pid
+            self._bundle_id = bundle_id
+            self._policy = policy
+            self.activated_options: list[int] = []
+
+        def processIdentifier(self) -> int:
+            return self._pid
+
+        def bundleIdentifier(self) -> str:
+            return self._bundle_id
+
+        def activationPolicy(self) -> int:
+            return self._policy
+
+        def activateWithOptions_(self, opts: int) -> bool:
+            self.activated_options.append(opts)
+            return True
+
+    class _FakeWorkspace:
+        def __init__(self, apps: list[_FakeApp]) -> None:
+            self._apps = apps
+
+        def runningApplications(self) -> list[_FakeApp]:
+            return self._apps
+
+    # Note: QuartzWindowBackend reads NSWorkspace.sharedWorkspace()
+    gta = _FakeApp(1212, "com.codeweavers.CrossOver", policy=0)
+    other = _FakeApp(2020, "com.example.Other", policy=0)
+    finder = _FakeApp(505, "com.apple.finder", policy=0)
+
+    backend = QuartzWindowBackend.__new__(QuartzWindowBackend)
+    pumped: list[float] = []
+    backend._pump_runloop = lambda s=0.05: pumped.append(s)  # type: ignore[method-assign]
+
+    class _NSWorkspaceCls:
+        def __init__(self, ws: _FakeWorkspace) -> None:
+            self._ws = ws
+
+        def sharedWorkspace(self) -> _FakeWorkspace:
+            return self._ws
+
+    class _AppKitNamespace:
+        NSApplicationActivationPolicyRegular = 0
+
+        def __init__(self, apps: list[_FakeApp]) -> None:
+            self.NSWorkspace = _NSWorkspaceCls(_FakeWorkspace(apps))
+
+    backend._appkit = _AppKitNamespace([gta, other, finder])
+    assert backend.yield_app_focus(1212, settle_s=0.2) == 505
+    assert finder.activated_options == [2]
+    assert gta.activated_options == []
+    assert other.activated_options == []
+    assert pumped == [0.2]
+
+    backend._appkit = _AppKitNamespace([gta])
+    assert backend.yield_app_focus(1212, settle_s=0.2) is None

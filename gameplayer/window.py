@@ -322,6 +322,31 @@ class QuartzWindowBackend:
         )
         subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=3.0)
 
+    def yield_app_focus(self, exclude_pid: int, settle_s: float = 0.25) -> Optional[int]:
+        """Briefly activate another running GUI app (preferring Finder) so Wine cycles WM_ACTIVATEAPP."""
+        ws = self._appkit.NSWorkspace.sharedWorkspace()
+        regular_policy = getattr(self._appkit, "NSApplicationActivationPolicyRegular", 0)
+        finder_app = None
+        fallback_app = None
+        for app in ws.runningApplications():
+            pid = int(app.processIdentifier())
+            if pid == int(exclude_pid):
+                continue
+            bundle_id = str(app.bundleIdentifier() or "")
+            if bundle_id == "com.apple.finder":
+                finder_app = app
+                break
+            if fallback_app is None and int(app.activationPolicy()) == int(regular_policy):
+                fallback_app = app
+        target_app = finder_app or fallback_app
+        if target_app is None:
+            return None
+        target_pid = int(target_app.processIdentifier())
+        target_app.activateWithOptions_(1 << 1)
+        if settle_s > 0:
+            self._pump_runloop(float(settle_s))
+        return target_pid
+
     def focus_window(self, window: WindowInfo, timeout_s: float = 1.5) -> bool:
         """Activate and raise the target window, verifying frontmost & unobstructed state.
 
@@ -519,6 +544,8 @@ def focus_game_window(
     warp_cursor_to_center: bool = True,
     click_to_activate: bool = False,
     activate_button: str = "right",
+    cycle_app_focus: bool = False,
+    yield_settle_s: float = 0.25,
     owner_patterns: Sequence[str] = DEFAULT_OWNER_PATTERNS,
     title_patterns: Sequence[str] = DEFAULT_TITLE_PATTERNS,
 ) -> WindowInfo:
@@ -535,6 +562,16 @@ def focus_game_window(
             owner_patterns=owner_patterns,
             title_patterns=title_patterns,
         )
+        if cycle_app_focus:
+            if hasattr(active_backend, "yield_app_focus"):
+                yielded_pid = active_backend.yield_app_focus(
+                    win.pid, settle_s=max(0.0, float(yield_settle_s))
+                )
+                details["cycled_app_focus"] = yielded_pid is not None
+                if yielded_pid is not None:
+                    details["yielded_to_pid"] = int(yielded_pid)
+            else:
+                details["cycled_app_focus"] = False
         ok = active_backend.focus_window(win)
         refreshed = find_game_window(
             backend=active_backend,

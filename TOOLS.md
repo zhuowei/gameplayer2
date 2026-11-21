@@ -36,10 +36,20 @@ Black-box window metadata discovery (`CGWindowListCopyWindowInfo`) and clean uno
 - `capture_game_window(target_width=None, crop_titlebar=True, require_16_9=True) -> CaptureResult`:
   - Normalizes aspect ratio to 16:9 (`normalize_to_16_9` crops top title bar if taller than 16:9, or horizontal center if wider).
   - `.to_numpy()` returns `(H, W, 3)` `uint8` RGB array; `.save(path)` writes PNG.
-- `focus_game_window(..., allow_focus=True, warp_cursor_to_center=True, click_to_activate=False, activate_button="right") -> WindowInfo`:
+- `focus_game_window(..., allow_focus=True, warp_cursor_to_center=True, click_to_activate=False, activate_button="right", cycle_app_focus=False, yield_settle_s=0.25) -> WindowInfo`:
   - **STRICT OWNERSHIP**: ONLY `player` may call `focus_game_window(..., allow_focus=True)`. Raises `PermissionError` if `allow_focus` is not explicitly `True`.
   - Uses Accessibility (`AXRaise` + `AXFrontmost`), Carbon `SetFrontProcess`, `NSRunningApplication.activateWithOptions_`, and `System Events` fallback, then pumps `NSRunLoop` and verifies both `is_frontmost` and `obstructed_by == ()` (raising `WindowCaptureError` if blocked).
   - Automatically warps the cursor to `window.bounds.center` (`warp_cursor_to_center=True`). Pass `click_to_activate=True` during live gameplay if Wine ignores keyboard/`mouse_delta` despite `is_frontmost=True` (**WARNING**: do NOT use `activate_button="right"` inside the Pause Menu because `right` backs out of menus).
+  - Pass `cycle_app_focus=True` (typically paired with `click_to_activate=True`) to briefly yield activation to another GUI app (`Finder` via `yield_app_focus(..., settle_s=yield_settle_s)`) before reactivating `GTA5.exe`, forcing Wine to emit a fresh `WM_ACTIVATEAPP` cycle.
+
+### Wine Keyboard-Freeze Diagnostic & Recovery (`#403`, `#409`, `#411`)
+
+- **Symptom**: `mouse_delta` and left/right clicks continue rotating/moving the camera, while **all** synthetic keyboard events (`tap`/`hold`/`System Events`) silently fail to register in `GTA5.exe` (`minimap`/frame unchanged).
+- **Read-only checks (safe for any role)**:
+  - Verify macOS event state is clean: `CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState)` has no stuck modifier bit (`caps/cmd/ctrl`), `IsSecureEventInputEnabled() == False`, `CGWindowList` shows `GTA5.exe` frontmost with `obstructed_by == ()`, and check whether an auxiliary `GTA5.exe` helper window (e.g. `66x20` `'Window'`) appeared.
+- **Recovery escalation (`player` / user)**:
+  1. First try `focus_game_window(..., allow_focus=True, cycle_app_focus=True, click_to_activate=True)` to force a macOS app switch + `WM_ACTIVATEAPP` + pointer click.
+  2. If `kCGHIDEventTap`, `CGSessionEventTap` (`source=None, flags=0`), `CGEventPostToPid`, and `osascript System Events` **all** still produce zero keyboard response while mouse works (`#409`/`#411`), Wine/CrossOver's internal keyboard message loop is wedged; escalate for a physical check (real key press / Social Club overlay dismiss) or a clean `GTA5.exe` game restart (`AGENTS.md` §3).
 
 ---
 
