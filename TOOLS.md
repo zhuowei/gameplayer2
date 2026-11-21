@@ -54,7 +54,7 @@ Sends macOS Quartz `CGEvent` keyboard/mouse events (`CGEventInputBackend`) with 
 - **Fault-Tolerant Release**: `release_all()` loops over every held key and mouse button individually so one backend error never prevents releasing the remaining inputs.
 - **Process Exit & Signals**: `atexit` and `SIGINT`/`SIGTERM` handlers release all held keys/buttons on active controllers before chaining prior handlers.
 - **Hard Timeout Watchdog**: Every timed action (`hold`, `tap`, `click`, `mouse_delta`, `run_sequence`) starts a `threading.Timer` watchdog (`default_timeout_s=10.0`, overrideable via `timeout_s` / `--timeout`). On expiration, the watchdog immediately calls `release_all()` and interrupts the action with `InputTimeoutError`.
-- **Intrinsic Key Flags**: `CGEventInputBackend` preserves `kCGEventFlagMaskNumericPad | kCGEventFlagMaskSecondaryFn` on arrow keys (`up`/`down`/`left`/`right`) and `kCGEventFlagMaskSecondaryFn` on `f1..f12`/navigation keys so Wine recognizes extended key presses cleanly.
+- **Intrinsic Key Flags**: `CGEventInputBackend` preserves native non-modifier `CGEventGetFlags` bits and enforces `kCGEventFlagMaskNumericPad | kCGEventFlagMaskSecondaryFn` on arrow keys (`up`/`down`/`left`/`right`) and `kCGEventFlagMaskSecondaryFn` on `f1..f12`/navigation keys so Wine recognizes extended key presses cleanly.
 - **Live Opt-In**: CLI requires `--live` (vs `--dry-run`). **STRICT OWNERSHIP**: ONLY `player` may pass `--live` or instantiate `CGEventInputBackend`.
 
 ### CLI Usage
@@ -186,3 +186,13 @@ Black-box screen-space enemy targeting and camera-response diagnostics used by `
 - `SilhouetteHumanDetectorBackend`: fast pure-`numpy` upright figure fallback for offline/synthetic frames and partial occlusions.
 - `select_visual_enemy_target(...)`: filters out foreground player (Trevor) and blue-ally boxes, matches candidates to minimap `bearing`, and outputs proportional ADS `(dx, dy)` toward visible enemy upper torsos (`visual_target_steer`).
 - `CameraMotionTracker`: 2D FFT phase-correlation over background horizon patches (`<5ms`) measuring actual `(delta_yaw_px, delta_pitch_px)` to detect cover yaw clamping / Wine drops (`camera_yaw_stalled`) and upward recoil pitch drift (`camera_recoil_comp`).
+- `classify_posture(image)`: classifies `in_cover` vs `standing` vs `unknown` from vertical cover-wall continuity and foreground silhouette height; paired with idempotent `ActionRunner.enter_cover()` and `ActionRunner.exit_cover(min_health=0.42)` (blocks exiting cover below `0.42` HP).
+- `ActionRunner.calibrate_controls()`: `<=5s` startup probe measuring hipfire vs ADS camera gain (`ads_to_hipfire_ratio`) and alerting on dropped mouse deltas (`logs/calibration.json`).
+
+---
+
+## 9. Offline Clip Benchmark, Playbooks & Status Store (`replay_bench`, `playbooks`, `status_store`)
+
+- `gameplayer.replay_bench`: offline `.mp4` evaluator (`.venv/bin/python -m gameplayer.replay_bench clips/*.mp4 --fps 2.0`) reporting Vision/silhouette locks, optical-flow confidence, yaw stalls, reticle locks, minimap HP, and posture counts.
+- `gameplayer.playbooks`: simulator-tested mission sequences (`prologue_yard_clear_and_push`, `safe_cover_heal_and_peek`, `open_phone_menu`).
+- `gameplayer.status_store`: atomic `logs/status.json` scoreboard snapshot (`write_status_snapshot` / `read_status_snapshot`, gitignored) so `watcher` updates never dirty `STATUS.md` on `main`.

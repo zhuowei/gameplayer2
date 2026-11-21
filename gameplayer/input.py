@@ -270,6 +270,13 @@ class CGEventInputBackend:
             "f17": fn_flags,
         }
 
+        self._clear_mod_mask = (
+            Quartz.kCGEventFlagMaskShift
+            | Quartz.kCGEventFlagMaskControl
+            | Quartz.kCGEventFlagMaskAlternate
+            | Quartz.kCGEventFlagMaskCommand
+        )
+
     def set_anchor_bounds(self, x: float, y: float, width: float, height: float) -> None:
         """Anchor cursor recentering inside the game window bounds `(x, y, width, height)`."""
         if width <= 0 or height <= 0:
@@ -308,7 +315,10 @@ class CGEventInputBackend:
 
     def _post(self, event: Any, extra_flags: int = 0) -> None:
         q = self._quartz
-        q.CGEventSetFlags(event, self._modifier_flags() | extra_flags)
+        base_flags = 0
+        if hasattr(q, "CGEventGetFlags"):
+            base_flags = int(q.CGEventGetFlags(event)) & ~self._clear_mod_mask
+        q.CGEventSetFlags(event, base_flags | self._modifier_flags() | extra_flags)
         if self._target_pid is not None:
             q.CGEventPostToPid(int(self._target_pid), event)
         else:

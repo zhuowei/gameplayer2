@@ -454,3 +454,96 @@ class CameraMotionTracker:
             delta_pitch_px=-img_dy * scale_xy[1],
             confidence=confidence,
         )
+
+
+@dataclass(frozen=True)
+class PostureStatus:
+    """Visual third-person posture / cover classification (`in_cover` vs `standing` vs `unknown`)."""
+
+    state: str                   # "in_cover" | "standing" | "unknown"
+    confidence: float            # 0.0..1.0
+    cover_wall_side: Optional[str] = None  # "left" | "right" | None
+    left_vertical_ratio: float = 0.0
+    right_vertical_ratio: float = 0.0
+    head_top_y: Optional[float] = None
+
+
+def classify_posture(
+    image: Image.Image,
+    human_detector: Optional[HumanDetectorBackend] = None,
+) -> PostureStatus:
+    """Classify GTA 5 third-person posture (`in_cover` vs `standing`) from vertical cover continuity & silhouette."""
+    gray = np.asarray(image.convert("L").resize((320, 180), Image.Resampling.BILINEAR), dtype=np.float32)
+    if float(np.std(gray)) < 4.0:
+        return PostureStatus(state="unknown", confidence=0.0)
+
+    def _zone_metrics(x0_rel: float, x1_rel: float) -> tuple[float, float, float]:
+        x0 = max(0, int(round(x0_rel * 320)))
+        x1 = min(320, int(round(x1_rel * 320)))
+        patch = gray[27:153, x0:x1]
+        up = gray[27:76, x0:x1]
+        lo = gray[99:153, x0:x1]
+        cont = abs(float(np.mean(up)) - float(np.mean(lo)))
+        gx = float(np.mean(np.abs(np.diff(patch, axis=1))))
+        gy = float(np.mean(np.abs(np.diff(patch, axis=0))))
+        return gx / (gy + 0.1), cont, gx + gy
+
+    l_ratio, l_cont, l_grad = _zone_metrics(0.18, 0.36)
+    r_ratio, r_cont, r_grad = _zone_metrics(0.48, 0.66)
+    if l_grad < 0.8 and r_grad < 0.8:
+        return PostureStatus(state="unknown", confidence=0.0)
+
+    head_top_y: Optional[float] = None
+    if human_detector is not None:
+        fg = [
+            t for t in human_detector.detect_humans(image, roi=(0.18, 0.35, 0.50, 0.99))
+            if t.bbox[3] >= 0.24 and (t.bbox[1] + t.bbox[3]) >= 0.76
+        ]
+        if fg:
+            head_top_y = min(t.bbox[1] for t in fg)
+
+    left_wall = l_ratio >= 1.15 and l_cont <= 14.0
+    right_wall = r_ratio >= 1.15 and r_cont <= 14.0
+    if left_wall or right_wall:
+        wall_side = "left" if (left_wall and (not right_wall or l_ratio >= r_ratio)) else "right"
+        peak_ratio = max(l_ratio if left_wall else 0.0, r_ratio if right_wall else 0.0)
+        conf = _clamp(0.62 + 0.25 * min(1.0, (peak_ratio - 1.15) / 0.25), 0.0, 0.95)
+        return PostureStatus(
+            state="in_cover",
+            confidence=conf,
+            cover_wall_side=wall_side,
+            left_vertical_ratio=l_ratio,
+            right_vertical_ratio=r_ratio,
+            head_top_y=head_top_y,
+        )
+
+    if head_top_y is not None and head_top_y >= 0.52:
+        return PostureStatus(
+            state="in_cover",
+            confidence=0.68,
+            cover_wall_side=None,
+            left_vertical_ratio=l_ratio,
+            right_vertical_ratio=r_ratio,
+            head_top_y=head_top_y,
+        )
+
+    if l_ratio < 1.04 and r_ratio < 1.04:
+        margin = max(0.0, 1.04 - max(l_ratio, r_ratio))
+        conf = _clamp(0.62 + 0.25 * min(1.0, margin / 0.20), 0.0, 0.92)
+        return PostureStatus(
+            state="standing",
+            confidence=conf,
+            cover_wall_side=None,
+            left_vertical_ratio=l_ratio,
+            right_vertical_ratio=r_ratio,
+            head_top_y=head_top_y,
+        )
+
+    return PostureStatus(
+        state="unknown",
+        confidence=0.35,
+        cover_wall_side=None,
+        left_vertical_ratio=l_ratio,
+        right_vertical_ratio=r_ratio,
+        head_top_y=head_top_y,
+    )

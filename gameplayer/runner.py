@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Iterable, Optional, Sequence
 
 import numpy as np
@@ -16,10 +19,12 @@ from gameplayer.perception import (
     CameraMotion,
     CameraMotionTracker,
     HumanDetectorBackend,
+    PostureStatus,
     ScreenTarget,
     SilhouetteHumanDetectorBackend,
     VisionHumanDetectorBackend,
     VisualSteerTarget,
+    classify_posture,
     expected_screen_x_from_bearing,
     select_visual_enemy_target,
 )
@@ -287,6 +292,7 @@ class ActionRunner:
         self._enable_visual_targeting = enable_visual_targeting
         self._enable_camera_motion_tracking = enable_camera_motion_tracking
         self._silhouette_fallback = SilhouetteHumanDetectorBackend()
+        self._in_cover_hint: Optional[bool] = None
 
     def _get_human_detector(self) -> Optional[HumanDetectorBackend]:
         if not self._enable_visual_targeting:
@@ -330,12 +336,186 @@ class ActionRunner:
 
     def _snap_cover_on_health_drop(self, mode_name: str) -> None:
         self._tap_key_preserving_held("q", hold_s=0.08)
+        self._in_cover_hint = True
         self._logger.log(
             tool="runner",
             action="cover_on_health_drop",
             status="ok",
             details={"mode": mode_name},
         )
+
+    def classify_current_posture(self) -> tuple[PostureStatus, CaptureResult]:
+        """Capture current frame and classify third-person posture (`in_cover` vs `standing`)."""
+        cap = capture_game_window(
+            backend=self._window_backend,
+            logger=self._logger,
+            require_16_9=True,
+        )
+        posture = classify_posture(cap.image, human_detector=self._get_human_detector())
+        return posture, cap
+
+    def enter_cover(self, force: bool = False, settle_s: float = 0.25) -> PostureStatus:
+        """Idempotently enter cover (`q` toggle): skips `q` when already classified `in_cover`."""
+        posture, before_cap = self.classify_current_posture()
+        if not force and (
+            (posture.state == "in_cover" and posture.confidence >= 0.60)
+            or (posture.state == "unknown" and self._in_cover_hint is True)
+        ):
+            self._in_cover_hint = True
+            self._logger.log(
+                tool="runner",
+                action="enter_cover_noop",
+                status="ok",
+                details={"state": posture.state, "confidence": round(posture.confidence, 3)},
+            )
+            return posture
+
+        self._tap_key_preserving_held("q", hold_s=0.08)
+        if settle_s > 0:
+            self._sleep(settle_s)
+        after_posture, after_cap = self.classify_current_posture()
+        # Check foreground pixel shift in player region [0.22..0.52, 0.42..0.95] as confirmation
+        b_fg = _road_gray_sample(before_cap.image)
+        a_fg = _road_gray_sample(after_cap.image)
+        shift_score = _road_motion_score(b_fg, a_fg)
+        self._in_cover_hint = True
+        self._logger.log(
+            tool="runner",
+            action="enter_cover",
+            status="ok",
+            details={
+                "before_state": posture.state,
+                "after_state": after_posture.state,
+                "shift_score": round(shift_score, 2),
+            },
+        )
+        return after_posture
+
+    def exit_cover(
+        self,
+        min_health: float = 0.42,
+        force: bool = False,
+        settle_s: float = 0.25,
+    ) -> tuple[bool, PostureStatus]:
+        """Idempotently exit cover (`q` toggle), refusing to stand if `health_ratio < min_health`."""
+        posture, before_cap = self.classify_current_posture()
+        mm = inspect_minimap(before_cap.image, logger=self._logger)
+        if not force and mm.minimap_visible and mm.health_ratio < min_health:
+            self._logger.log(
+                tool="runner",
+                action="exit_cover_blocked_low_health",
+                status="ok",
+                details={"health_ratio": round(mm.health_ratio, 3), "min_health": min_health},
+            )
+            return False, posture
+
+        if not force and (
+            (posture.state == "standing" and posture.confidence >= 0.60)
+            or (posture.state == "unknown" and self._in_cover_hint is False)
+        ):
+            self._in_cover_hint = False
+            self._logger.log(
+                tool="runner",
+                action="exit_cover_noop",
+                status="ok",
+                details={"state": posture.state, "confidence": round(posture.confidence, 3)},
+            )
+            return True, posture
+
+        self._tap_key_preserving_held("q", hold_s=0.08)
+        if settle_s > 0:
+            self._sleep(settle_s)
+        after_posture, _ = self.classify_current_posture()
+        self._in_cover_hint = False
+        self._logger.log(
+            tool="runner",
+            action="exit_cover",
+            status="ok",
+            details={"before_state": posture.state, "after_state": after_posture.state},
+        )
+        return True, after_posture
+
+    def calibrate_controls(
+        self,
+        probe_dx: int = 20,
+        aim_settle_s: float = 0.18,
+        min_response_px: float = 3.0,
+        save_path: Optional[Path | str] = Path("logs/calibration.json"),
+    ) -> dict[str, object]:
+        """Run a <=5s startup input & ADS/hipfire camera gain self-calibration."""
+        start_t = self._clock()
+        tracker = CameraMotionTracker()
+        hipfire_yaw_px = 0.0
+        hipfire_conf = 0.0
+        ads_yaw_px = 0.0
+        ads_conf = 0.0
+        minimap_visible = False
+
+        try:
+            c0 = capture_game_window(backend=self._window_backend, logger=self._logger, require_16_9=True)
+            if hasattr(self.input.backend, "set_anchor_bounds"):
+                wb = c0.window.bounds
+                if wb.width > 0 and wb.height > 0:
+                    self.input.backend.set_anchor_bounds(wb.x, wb.y, wb.width, wb.height)
+            mm0 = inspect_minimap(c0.image, logger=self._logger)
+            minimap_visible = mm0.minimap_visible
+            tracker.update(c0.image)
+
+            # 1) Hipfire yaw probe
+            self.input.mouse_delta(probe_dx, 0, steps=4, duration_s=0.06)
+            self._sleep(0.06)
+            c1 = capture_game_window(backend=self._window_backend, logger=self._logger, require_16_9=True)
+            m_hip = tracker.update(c1.image)
+            hipfire_yaw_px = float(m_hip.delta_yaw_px)
+            hipfire_conf = float(m_hip.confidence)
+            self.input.mouse_delta(-probe_dx, 0, steps=4, duration_s=0.06)
+            self._sleep(0.05)
+
+            # 2) ADS yaw probe
+            self.input.mouse_down("right")
+            if aim_settle_s > 0:
+                self._sleep(aim_settle_s)
+            c2 = capture_game_window(backend=self._window_backend, logger=self._logger, require_16_9=True)
+            tracker.update(c2.image)
+            self.input.mouse_delta(probe_dx, 0, steps=4, duration_s=0.06)
+            self._sleep(0.06)
+            c3 = capture_game_window(backend=self._window_backend, logger=self._logger, require_16_9=True)
+            m_ads = tracker.update(c3.image)
+            ads_yaw_px = float(m_ads.delta_yaw_px)
+            ads_conf = float(m_ads.confidence)
+            self.input.mouse_delta(-probe_dx, 0, steps=4, duration_s=0.06)
+            self._sleep(0.02)
+            self.input.mouse_up("right")
+        finally:
+            self.input.release_all(reason="calibrate_controls", suppress_errors=True)
+
+        hipfire_gain = abs(hipfire_yaw_px) / max(1, abs(probe_dx))
+        ads_gain = abs(ads_yaw_px) / max(1, abs(probe_dx))
+        ads_hipfire_ratio = (ads_gain / hipfire_gain) if hipfire_gain > 1e-4 else 0.0
+        mouse_responsive = (abs(hipfire_yaw_px) >= min_response_px) or (abs(ads_yaw_px) >= min_response_px)
+        elapsed_s = max(0.0, self._clock() - start_t)
+        report: dict[str, object] = {
+            "elapsed_s": round(elapsed_s, 3),
+            "probe_dx": probe_dx,
+            "minimap_visible": minimap_visible,
+            "mouse_responsive": mouse_responsive,
+            "hipfire_yaw_px": round(hipfire_yaw_px, 2),
+            "hipfire_confidence": round(hipfire_conf, 3),
+            "hipfire_px_per_dx": round(hipfire_gain, 3),
+            "ads_yaw_px": round(ads_yaw_px, 2),
+            "ads_confidence": round(ads_conf, 3),
+            "ads_px_per_dx": round(ads_gain, 3),
+            "ads_to_hipfire_ratio": round(ads_hipfire_ratio, 3),
+            "warning": None if mouse_responsive else "mouse_unresponsive_check_raw_input_or_focus",
+        }
+        self._logger.log(tool="runner", action="calibrate_controls", status="ok", details=report)
+        if save_path is not None:
+            out = Path(save_path)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            tmp = out.with_name(f".{out.name}.tmp.{os.getpid()}")
+            tmp.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+            os.replace(tmp, out)
+        return report
 
     def _run_loop(
         self,
@@ -967,6 +1147,7 @@ class ActionRunner:
                 _set_movement(False)
                 if tap_cover:
                     self._tap_key_preserving_held("q", hold_s=0.08)
+                    self._in_cover_hint = True
                 self._logger.log(
                     tool="runner",
                     action="advance_exposed",
@@ -1044,6 +1225,7 @@ class ActionRunner:
                     recover_start_health = mm.health_ratio
                     _reset_motion_tracker()
                     self._tap_key_preserving_held("q", hold_s=0.08)
+                    self._in_cover_hint = True
                     self._logger.log(
                         tool="runner",
                         action="advance_recover",
@@ -1351,6 +1533,7 @@ class ActionRunner:
         )
         if cover_on_timeout and result.stop_reason == "timeout" and phase != "recover":
             self._tap_key_preserving_held("q", hold_s=0.08)
+            self._in_cover_hint = True
             self._logger.log(
                 tool="runner",
                 action="advance_timeout_cover",
@@ -1847,6 +2030,9 @@ class ActionRunner:
         )
         if enter_cover:
             self._tap_key_preserving_held("q", hold_s=0.08)
+            self._in_cover_hint = True
+        elif self._in_cover_hint is None:
+            self._in_cover_hint = True
 
         special_triggered = False
         is_peeking = False

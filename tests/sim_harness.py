@@ -298,12 +298,14 @@ class KinematicWorld:
         draw.rectangle((0, max(0, min(h, horizon_y)), w, h), fill=(195, 206, 218))
 
         # Background skyline posts shifting smoothly with yaw/pitch for optical-flow tracking.
-        for wx in range(-180, 210, 18):
+        for wx in range(-180, 195, 13):
             rel_yaw = ((wx - self.yaw_deg + 180.0) % 360.0) - 180.0
             if abs(rel_yaw) <= self.fov_h_deg * 0.7:
                 sx = int(round((0.5 + rel_yaw / self.fov_h_deg) * w))
-                post_h = 85 + (abs(wx) % 35)
-                draw.rectangle((sx - 8, horizon_y - post_h, sx + 8, horizon_y), fill=(48, 56, 66))
+                post_h = 38 + ((abs(wx) * 37 + 11) % 92)
+                post_w = 5 + ((abs(wx) * 13 + 3) % 11)
+                shade = 40 + ((abs(wx) * 23) % 35)
+                draw.rectangle((sx - post_w, horizon_y - post_h, sx + post_w, horizon_y), fill=(shade, shade + 8, shade + 16))
 
         # Project occluders and alive enemies sorted far-to-near.
         items: list[tuple[float, str, object]] = []
