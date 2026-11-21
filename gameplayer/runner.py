@@ -2143,7 +2143,7 @@ class ActionRunner:
         arrive_distance: float = 0.06,
         approach_duration_s: float = 12.0,
         enter_key: str = "f",
-        settle_s: float = 2.5,
+        settle_s: float = 3.8,
         enter_prompt_keywords: Sequence[str] = ("get in", "enter", "vehicle", "car"),
         post_drive_keywords: Sequence[str] = ("get to", "drive", "lose", "escape", "follow", "cops", "police"),
         config: Optional[LoopConfig] = None,
@@ -2238,12 +2238,14 @@ class ActionRunner:
                 cur_target, _ = self._resolve_route_target_and_bearing(cur_mm, target_color)
                 shift_score = _road_motion_score(pre_gray, _road_gray_sample(cur_cap.image))
 
+                near_for_shift = pre_target is None or pre_target.distance <= max(arrive_distance * 2.5, 0.16)
+                close_for_drive = pre_target is None or pre_target.distance <= 0.14
                 if (
                     (pre_had_enter and not cur_has_enter)
-                    or cur_has_drive
-                    or (pre_yellow_route is None and cur_mm.yellow_route_bearing is not None)
+                    or (cur_has_drive and close_for_drive)
+                    or (pre_yellow_route is None and cur_mm.yellow_route_bearing is not None and close_for_drive)
                     or (pre_target is not None and cur_target is None and (self._clock() - poll_start) >= 0.75)
-                    or (shift_score >= 12.0 and not cur_has_enter and (self._clock() - poll_start) >= 0.75)
+                    or (shift_score >= 12.0 and near_for_shift and not cur_has_enter and (self._clock() - poll_start) >= 0.75)
                 ):
                     stop_reason = "entered_vehicle"
                     break
@@ -2271,6 +2273,8 @@ class ActionRunner:
         steer_right_key: str = "d",
         arrive_distance: float = 0.07,
         steer_deadband: float = 0.08,
+        mild_steer_threshold: float = 0.24,
+        mild_steer_pulse_s: float = 0.045,
         sharp_turn_threshold: float = 0.45,
         enable_stuck_recovery: bool = True,
         stuck_window_s: float = 1.5,
@@ -2362,10 +2366,20 @@ class ActionRunner:
                 _set_key(throttle_key, True)
                 return None
 
-            _set_key(steer_left_key, bearing < -steer_deadband)
-            _set_key(steer_right_key, bearing > steer_deadband)
             _set_key(throttle_key, not sharp)
             _set_key(brake_key, sharp)
+            if abs(bearing) < steer_deadband:
+                _set_key(steer_left_key, False)
+                _set_key(steer_right_key, False)
+            elif abs(bearing) < mild_steer_threshold:
+                steer_key = steer_left_key if bearing < 0 else steer_right_key
+                other_key = steer_right_key if bearing < 0 else steer_left_key
+                _set_key(other_key, False)
+                _set_key(steer_key, False)
+                self._tap_key_preserving_held(steer_key, hold_s=mild_steer_pulse_s)
+            else:
+                _set_key(steer_left_key, bearing < 0)
+                _set_key(steer_right_key, bearing > 0)
             return None
 
         return self._run_loop(

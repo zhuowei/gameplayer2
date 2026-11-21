@@ -4,12 +4,12 @@ Updated by `watcher` (and initialized by `toolsmith` in Phase 0).
 
 ## Current Run State
 
-- **Current Mission / Checkpoint**: Prologue — Yard / Roadblock / Getaway SUV (`508bfb9` live; `46/130` = `35.4%` `red_reticle` in `10:43–11:03Z`)
-- **Consecutive Failures**: `0` post-`508bfb9` (`2` prior: `#363`, `#368`)
-- **Minutes on Checkpoint**: `30` (`#372` Checkpoint 8 Retrospective at `03:04 PST`)
-- **LLM Turns per Checkpoint**: `3`
-- **Minutes Since Last Commit**: `0` (Cycle 15 commit)
-- **Active Issues**: Checkpoint 8 (`#372`) Cycle 15: 2-streak away-from-`enemy.bearing` polarity flip in `advance_flank_unblock` (`// 2`) & closed-loop `enter_nearest_vehicle()` boarding verifier before `follow_gps_drive()`. `capture_daemon` active.
+- **Current Mission / Checkpoint**: Prologue — Boarded Getaway SUV (`#376`, `"Shut the fuck up and drive."`, `0` deaths in `11:13–11:32Z`)
+- **Consecutive Failures**: `0` (`cover_exposed: 0` across `11:13–11:32Z`)
+- **Minutes on Checkpoint**: `2` (`#376` boarded getaway SUV at `03:31 PST`)
+- **LLM Turns per Checkpoint**: `1`
+- **Minutes Since Last Commit**: `0` (Cycle 16 commit)
+- **Active Issues**: Checkpoint 9 (`#377`) Cycle 16: distance-gated `enter_nearest_vehicle` (`pre_dist <= 0.14` / `0.16`, `settle_s=3.8`), smooth `0.045s` mild-curve steer pulsing in `follow_gps_drive`, & Checkpoint 9 retrospective (`LESSONS_LEARNED.md`). `capture_daemon` active.
 
 ## Self-Improvement Log
 
@@ -65,4 +65,5 @@ Updated by `watcher` (and initialized by `toolsmith` in Phase 0).
 | Checkpoint 6 (Cycle 12) | `_silhouette_fallback` hijacked live `advance_under_fire` onto yellow-striped concrete pillars/pipes (`0/18` `red_reticle`, `#348`), Brad occluded same-bearing cops (`f_010`), & `"low_health"` left Trevor exposed (`#351`). | `c48b247`: Disable `_silhouette_fallback` when using `VisionHumanDetectorBackend`, filter closer occluding `blue` allies + `ay > 0.57` floor boxes, yield `aligned_ticks >= 5` visual misses to `DEFAULT_RETICLE_SWEEP`, add `cover_on_low_health=True` to `advance_under_fire`, & append Checkpoint 6 retrospective. | `@verifier-3` PASS (`#354`, `125 passed`); pushed past gate (`#355`), `tap_cover=True` saved `0.247` HP, `enemies_cleared` at roadblock (`10:29:50Z`). |
 | Checkpoint 7 (Cycle 13) | Cops behind white Police SUV roadblock (`clips/check_1026.mp4`) missed by full Vision ROI while blind `2`-burst probes wasted rifle ammo (`3/70` `red_reticle`) & `0.55s` flanks reset across calls (`#358`, `#359`). | `01ed49f`: Add hood-height Vision ROI `(0.22, 0.25, 0.88, 0.58)`, `1`-burst blind probe (`no_lock_ticks == 8`) + skip `hold_engage_threat` extension at `0` red hits, `0.85s` lateral SUV flank + `self._last_flank_streak` persistence, & append Checkpoint 7 retrospective. | `@verifier-3` PASS (`#364`, `126 passed`); roadblock cleared & reached getaway SUV (`#361`). |
 | Checkpoint 7 (Cycle 14) | Calling `cover_peek_combat(enter_cover=True)` after `advance_under_fire(low_health tap_cover=True)` blindly toggled `'q'` OUT of cover (`#366`, `#367`). | `508bfb9`: Replace blind `'q'` tap in `cover_peek_combat(enter_cover=True)` with idempotent `self.enter_cover(force=False)` and guard `cover_duck` entry against exposed standing posture (`head_top_y < 0.45`). | `@verifier-3` PASS (`#370`, `127 passed`); merged & pushed to `main`. |
-| Checkpoint 8 (Cycle 15) | Blind `w 0.8s + f` overshot getaway SUV (`#363`) and `advance_flank_unblock` locked 4 streaks onto one blocked side (`#372`). | Cycle 15: Switch `advance_flank_unblock` polarity after `2` blocked attempts (`// 2`, initial side away from `enemy.bearing`), add `enter_nearest_vehicle()` boarding verifier (`TOOLS.md`), & append Checkpoint 8 retrospective (`LESSONS_LEARNED.md`). | Pending `@verifier-3` QA. |
+| Checkpoint 8 (Cycle 15) | Blind `w 0.8s + f` overshot getaway SUV (`#363`) and `advance_flank_unblock` locked 4 streaks onto one blocked side (`#372`). | `90629bd`: Switch `advance_flank_unblock` polarity after `2` blocked attempts (`// 2`, initial side away from `enemy.bearing`), add `enter_nearest_vehicle()` boarding verifier (`TOOLS.md`), & append Checkpoint 8 retrospective (`LESSONS_LEARNED.md`). | `@verifier-3` PASS (`#374`, `128 passed`); roadblock cleared & getaway SUV boarded (`#376`). |
+| Checkpoint 9 (Cycle 16) | `enter_nearest_vehicle` false-confirmed at `pre_dist=0.373` (`shift_score >= 12`) and missed `pre_dist=0.058` under `settle_s=2.5`, plus binary driving steer risk (`#377`). | Cycle 16: Gate `shift_score` (`<= max(arrive_distance * 2.5, 0.16)`) & `cur_has_drive` (`<= 0.14`) in `enter_nearest_vehicle(settle_s=3.8)`, add smooth `0.045s` mild-curve steer pulsing (`0.08..0.24`) in `follow_gps_drive()`, & append Checkpoint 9 retrospective. | Pending `@verifier-3` QA. |

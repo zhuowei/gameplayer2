@@ -1019,3 +1019,76 @@ def test_advance_flank_unblock_away_from_bearing_and_enter_nearest_vehicle(tmp_p
     assert res_miss.stop_reason == "vehicle_entry_unconfirmed"
     assert ("key_down", "f") in backend_m.events
     assert backend_m.currently_held_keys == set()
+
+
+def test_enter_nearest_vehicle_distance_gate_settle_38_and_follow_gps_drive_mild_pulse(tmp_path) -> None:
+    """Re #377: pre_dist=0.373 with high shift/text must not false-confirm; settle_s=3.8 waits for boarding; mild curves pulse."""
+    # 1) Far car (pre_dist ~ 0.377) + large visual shift + "Get to the car" text must NOT false-confirm entered_vehicle.
+    f_far = make_synthetic_minimap_frame(health_ratio=0.90, blue_points=[(0.50, 0.48)])  # (0.77 - 0.48)/0.77 = 0.377
+    f_far_shifted = f_far.copy()
+    ImageDraw.Draw(f_far_shifted).rectangle((220, 120, 960, 480), fill=(230, 230, 230))
+    far_frames = [f_far, f_far, f_far_shifted]
+    clock_far = FakeClock()
+    backend_far = RecordingInputBackend()
+    log_far = tmp_path / "far_gate.jsonl"
+    ctrl_far = InputController(backend_far, TelemetryLogger(log_far), clock=clock_far, sleep_fn=clock_far.sleep, register_signals=False)
+    runner_far = ActionRunner(
+        ctrl_far,
+        ReplayWindowBackend(lambda idx: far_frames[min(idx, len(far_frames) - 1)]),
+        ScriptedHudOCR(lambda _i: {"bottom_subtitle": [OcrLine("Get to the car.", 0.95, (0.2, 0.8, 0.6, 0.1))]}),
+        TelemetryLogger(log_far),
+        clock=clock_far,
+        sleep_fn=clock_far.sleep,
+    )
+    res_far = runner_far.enter_nearest_vehicle(target_color="blue", arrive_distance=0.06, approach_duration_s=0.1, settle_s=1.2)
+    assert res_far.stop_reason == "vehicle_entry_unconfirmed"
+    assert backend_far.currently_held_keys == set()
+
+    # 2) Default settle_s=3.8 confirms late door-walk boarding (e.g. at ~3.2s when pre_dist=0.052).
+    f_door = make_synthetic_minimap_frame(health_ratio=0.90, blue_points=[(0.50, 0.73)])  # dist=0.052
+    f_boarded = make_synthetic_minimap_frame(health_ratio=0.90, route_yellow_rel=[(0.50, 0.55), (0.50, 0.10)])
+    t0_ref = {"t": None}
+
+    def _late_frame(_idx: int) -> Image.Image:
+        if t0_ref["t"] is None:
+            t0_ref["t"] = clock_late()
+        return f_boarded if (clock_late() - t0_ref["t"]) >= 3.0 else f_door
+
+    clock_late = FakeClock()
+    backend_late = RecordingInputBackend()
+    log_late = tmp_path / "late_board.jsonl"
+    ctrl_late = InputController(backend_late, TelemetryLogger(log_late), clock=clock_late, sleep_fn=clock_late.sleep, register_signals=False)
+    runner_late = ActionRunner(
+        ctrl_late,
+        ReplayWindowBackend(_late_frame),
+        ScriptedHudOCR(lambda _i: {}),
+        TelemetryLogger(log_late),
+        clock=clock_late,
+        sleep_fn=clock_late.sleep,
+    )
+    res_late = runner_late.enter_nearest_vehicle(target_color="blue", arrive_distance=0.06)
+    assert res_late.stop_reason == "entered_vehicle"
+    assert res_late.elapsed_s >= 2.8
+
+    # 3) follow_gps_drive pulses 'd' (key_down + key_up per tick) on mild curve (bearing ~ +0.16 in [0.08, 0.24)) while keeping 'w' held.
+    f_mild = make_synthetic_minimap_frame(health_ratio=0.95, yellow_points=[(0.54, 0.65)])  # bearing ~ +0.165
+    clock_drv = FakeClock()
+    backend_drv = RecordingInputBackend()
+    log_drv = tmp_path / "mild_drive.jsonl"
+    ctrl_drv = InputController(backend_drv, TelemetryLogger(log_drv), clock=clock_drv, sleep_fn=clock_drv.sleep, register_signals=False)
+    runner_drv = ActionRunner(
+        ctrl_drv,
+        ReplayWindowBackend(lambda _i: f_mild),
+        ScriptedHudOCR(lambda _i: {}),
+        TelemetryLogger(log_drv),
+        clock=clock_drv,
+        sleep_fn=clock_drv.sleep,
+    )
+    runner_drv.follow_gps_drive(
+        enable_stuck_recovery=False,
+        config=LoopConfig(max_duration_s=0.45, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert backend_drv.events.count(("key_down", "d")) >= 3
+    assert backend_drv.events.count(("key_up", "d")) >= 3
+    assert backend_drv.events.count(("key_down", "w")) == 1
+    assert backend_drv.currently_held_keys == set()

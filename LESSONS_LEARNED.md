@@ -181,3 +181,16 @@ Escalating deep perception and control failures to `Carbon` specialists produced
   2. **`advance_flank_unblock` 4-streak one-side lock (`runner.py:1922`)**: Locked `4` consecutive attempts (`((streak - 1) // 4) % 2 == 0`) onto `'d'` (`10:57:46–10:58:15`, `11:01:12–11:01:47`) while `enemy_distance` stayed pinned at `0.157–0.180`, wasting full `50s` advance runs.
   3. **Tall-pillar `enter_cover` (`10:43:44`, `10:50:00`, `#368`)**: `shift_score=26.85 / 22.0` latched `_in_cover_hint=True` while `classify_posture` returned `"standing"` near tall pillar silhouettes, and flanking cops on the front pillar still damaged Trevor during `cover_duck` (`10:52:23 -> 10:52:59`).
 - **Cycle 15 Fixes**: Flipped `advance_flank_unblock` polarity after **2** blocked attempts (`// 2` instead of `// 4`, picking initial side away from `enemy.bearing` when `abs(enemy.bearing) > 0.12` on `streak == 1`), and added `ActionRunner.enter_nearest_vehicle()` (closed-loop `follow_route_on_foot` approach + `'f'` tap + HUD/route/scene boarding verification before `follow_gps_drive`).
+
+---
+
+## 13. Checkpoint 9 (2026-11-21 03:32 PST / 11:32Z)
+
+- **What went right (`508bfb9`, `90629bd`, `#376`, `#377`)**:
+  - **Zero `MISSION_FAILED` banners** and **`cover_exposed: 0`** across `11:13Z–11:32Z` (Cycle 14's idempotent `enter_cover(force=False)` + `cover_duck` standing guard held cleanly).
+  - `player-5` cleared the North Yankton roadblock cops and **boarded the getaway SUV** with Michael & Brad (`#376`, `captures/p5_boarded_suv2.png`, `"Shut the fuck up and drive."`).
+- **What did not work (`#377`)**:
+  1. **Low `red_reticle` vs cruiser-crouched cops (`6/47` = `12.8%`, `11:13–11:31Z`)**: ~20m roadblock grind before clearing.
+  2. **`enter_nearest_vehicle` far-distance false confirmation (`pre_dist=0.373` at `11:27:30`) & short `settle_s=2.5` (`11:28:45`)**: Ungated `shift_score >= 12.0` / `cur_has_drive` confirmed boarding far from the SUV, while `2.5s` cut off the door-walk animation at `pre_dist=0.058`.
+  3. **Binary full-tick driving steer (`runner.py:2365-2368`)**: Holding `'a'`/`'d'` across full `100ms` ticks on mild `0.08..0.24` curves risks high-speed fishtailing/weaving.
+- **Cycle 16 Fixes**: Gated `enter_nearest_vehicle` `shift_score >= 12.0` on `pre_target is None or pre_target.distance <= max(arrive_distance * 2.5, 0.16)` and `cur_has_drive`/route on `pre_target.distance <= 0.14`, raised default `settle_s=3.8`, and added smooth `0.045s` mild-curve steer pulsing (`steer_deadband <= |bearing| < 0.24`) in `follow_gps_drive`.
