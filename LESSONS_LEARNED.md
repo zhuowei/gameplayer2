@@ -225,3 +225,76 @@ Escalating deep perception and control failures to `Carbon` specialists produced
   - **Cycle 21 Recovery Tooling (`gameplayer/window.py`, `TOOLS.md`)**: Added `cycle_app_focus: bool = False` / `yield_app_focus` support to `focus_game_window()` so `player` can cleanly cycle `Finder` -> `GTA5.exe` + click for a fresh Wine `WM_ACTIVATEAPP`, and documented the read-only diagnostic + escalation steps (`#412`).
 - **What did not work (`#403`, `#409`–`#412`)**:
   - **Internal Wine Keyboard Loop Wedge (`12:59:52Z`–`14:15Z`)**: Immediately after `enter_nearest_vehicle` tapped `'f'` at `12:59:52Z` (`captures/p6_car_enter2.png` / `p6_car_enter3.png`), `GTA5.exe` (`-useNativeInputSupport -scEnableOverlayV3`) stopped consuming any macOS keyboard events while still accepting mouse movement/clicks, stalling *"Franklin and Lamar"* for `~75` minutes (`> 6 min` trigger) because no external synthetic macOS API can unstick Wine's wedged keyboard consumer without a physical check or game restart (`#412`).
+
+---
+
+## 17. Session 2 Final Synthesis (2026-11-20 – 2026-11-21): Full Retrospective & Next-Time Playbook
+
+### A. Session 1 vs. Session 2 Quantitative Scorecard
+
+| Metric | Session 1 (`2026-11-17`, `06ad9e3..a216bdc`) | Session 2 (`2026-11-20`–`21`, `410ee3f..a1d305f`) |
+| :--- | :--- | :--- |
+| **Window** | `06:21Z–15:59Z` (~9h 38m) | `06:59Z–17:25Z` (~10h 26m; ~6h active play to `12:59Z` + ~4.4h Wine wedge diagnosis/idle) |
+| **Commits / Cycles** | `40` commits / `35` cycles | `23` commits / `21` cycles across `12` 30-min retrospectives |
+| **Codebase Size** | `7,940` LOC (`4,848` runtime + `3,092` tests) | `12,654` LOC (`7,282` runtime + `5,372` tests) |
+| **Offline Test Suite** | `94` unit tests (static mocks) | `132` tests (+ advancing-clock 2.5D simulator + offline `replay_bench`) |
+| **Telemetry Volume** | `316,602` events (`183` 3-min video segments) | `132,999` events (`192` 3-min video segments) |
+| **Combat Efficiency (`red_reticle / fire_burst`)** | `363 / 5,683` (**`6.4%`** overall; peak `27.0%`) | `95 / 410` (**`23.2%`** overall; peak **`56.4%` (`22/39`)** in `cover_peek_combat` `09:50–09:53Z` — **3.6× hit rate with 13.9× fewer rounds**) |
+| **`banner:MISSION_FAILED` Loops** | `47` resets | **`11` loop fails** (`4` cover, `1` advance, `5` getaway driving, `1` SUV overshoot — **77% fewer resets**) |
+| **Input Safety Leaks** | `0` stuck OS keys (`1,106` `release_all`) | `0` stuck OS keys (`698` `release_all`, `4` clean `focus_lost` aborts) |
+| **Story Mode Milestone** | Stalled in Prologue Snowy Barn Road | **PROLOGUE COMPLETE (`#399`)** -> Los Santos opening credits -> entered **"Franklin and Lamar"** (`p6_sidewalk.png`, halted by Wine keyboard wedge) |
+
+### B. What Went Right in Session 2
+
+1. **Screen-Space Visual Targeting (`VisionHumanDetectorBackend`) Transformed Combat**:
+   - Running Apple's native `VNDetectHumanRectanglesRequest` (`gameplayer/perception.py`) at `11.5–23.3 ms/frame` plus a hood-height fallback ROI `(0.22, 0.25, 0.88, 0.58)` (`01ed49f`) and immediate visual-aligned fire (`8101e43`) lifted live `cover_peek_combat` `red_reticle` accuracy to **`56.4%` (`22/39`)** and raised overall session hit efficiency from `6.4%` to **`23.2%`** while cutting total bursts fired by `13.9×` (`5,683 -> 410`).
+   - Crucially, pruning noisy heuristic fallbacks (`_silhouette_fallback` disabled under Vision in `c48b247`), adding closer-ally (`Brad`) occlusion filtering, and capping blind suppressive ammo (`01ed49f`) let `player-5` clear the entire North Yankton depot yard and roadblock with `0` deaths in `11:13Z–11:32Z`.
+2. **Advancing-Clock 2.5D Simulator & Offline Video Replay Benchmark**:
+   - `tests/sim_harness.py` (`492` LOC) + `tests/test_sim_rollout.py` (`1,198` LOC) and `gameplayer/replay_bench.py` (`204` LOC) moved multi-second timing, recoil, ADS/hipfire sensitivity, cover-toggle, and driving-stall regressions out of slow live retries into deterministic `<1s` offline rollouts.
+3. **macOS HID Flag Hygiene Solved Two "Mystery" Input Failures**:
+   - Preserving native `0x20000000` bits + setting `NumericPad | SecondaryFn` on arrow/Fn keys (`410ee3f`, `f87c9a2`) unblocked the Prologue vault phone.
+   - Discovering that `CGEventCreateKeyboardEvent` silently attached `kCGEventFlagMaskSecondaryFn (0x800000)`—turning `'q'` into macOS `Fn+Q` (**Quick Note**, launching `Notes(pid=6487)` over `GTA5.exe`)—and stripping it in `_clear_mod_mask` (`645e456`) immediately unlocked cover snapping and cleared the Shutter Room.
+4. **Defensive Cover Idempotency & Focus Guards Eliminated Turn-Gap Wipes**:
+   - Combining `stop_on_focus_loss=True` (`eb21097`), `cover_on_low_health=True` (`c48b247`, saving Trevor live at `0.247` HP), idempotent `enter_cover(force=False)` in `cover_peek_combat` (`508bfb9`), and `cover_duck` standing guards drove `cover_exposed` to `0` across the final shootout push.
+5. **Closed-Loop Driving & Vehicle Boarding Cleared Prologue**:
+   - Iterating `enter_nearest_vehicle()` (`90629bd`, `b92fb64`) and `follow_gps_drive()` (`0.045s` mild-curve steer pulsing, `0.25s` sharp brake pulse, `high_bearing_stall` + `target_dist_stall`, and `last_motion_check_t` reset in `3cd2628`/`b1c448e`) cleared the North Yankton getaway drive (`#396`) and completed **Prologue (`#399`)**.
+6. **Operational Discipline (30-Minute Retrospectives, `logs/status.json`, Clean Rotation)**:
+   - Decoupling machine-written scoreboard snapshots into gitignored `logs/status.json` (`gameplayer/status_store.py`) eliminated Session 1's `STATUS.md` worktree merge collisions.
+   - Scheduled 30-minute retrospectives (`Checkpoints 1–12`) kept engineering tightly coupled to telemetry and short video slices, and rotating `player-4 -> player-5 -> player-6` kept live gameplay crisp across mission transitions.
+
+### C. What Did Not Work (Root Causes & Remaining Failure Modes)
+
+1. **Internal Wine / GPTK Keyboard Loop Wedge (`#403`, `#409`, `#411` — Final Hard Blocker)**:
+   - Right after `tap("f")` at `12:59:52Z` in *"Franklin and Lamar"*, `GTA5.exe` (`pid=1212`) stopped consuming all keyboard input (`f`, `w`, `s`, `v`, `escape`, `p`, `enter`, `space`, `tab`) while live highway traffic and `mouse_delta`/right-click camera controls kept working.
+   - All four external macOS keyboard paths (`kCGHIDEventTap`, `CGEventPostToPid(1212)`, `kCGSessionEventTap` with `source=None, flags=0`, and `osascript System Events`) plus `Finder` app-focus cycling and modifier pulses failed despite `AXIsProcessTrusted=True`, `CGPreflightPostEventAccess=True`, `IsSecureEventInputEnabled=False`, and `Held=[]`. Because there was no fast dead-keyboard abort/escalation rule, *"Franklin and Lamar"* stalled `>75` minutes before escalating to the user.
+2. **Heuristic Fallbacks Poisoning Clean Perception**:
+   - Leaving `_silhouette_fallback` enabled behind `VisionHumanDetectorBackend` injected `130` false visual steers (`0/18` `red_reticle` on pillars/pipes/shadows) until disabled (`c48b247`).
+   - Column-brightness posture heuristics (`classify_posture`) repeatedly misclassified crouch-cover near tall pillars or center props (`shift_score=22..26` yet `"standing"`), requiring multiple band patches (`4925b9a`, `4aeca4e`).
+3. **Stall-Detector Blind Spots & Clock Reset Bugs**:
+   - `_road_motion_score` alone could not distinguish forward progress from camera panning (`1e6fc22`) or wheelspin/bumper-rocking against a parked car (`#382`, `0` recoveries in `2x45s`).
+   - Conversely, forgetting `last_motion_check_t = None` inside `_perform_stuck_recovery()` charged `1.3s` of recovery sleep to the next tick's `dt`, and setting `high_bearing_stall` at `0.30` triggered `8` reverse slams in `19s` (`#391`, `Michael died`).
+4. **Partial Occlusion Behind Vehicles**:
+   - Even with the hood-height ROI (`01ed49f`), cops crouched tightly behind police cruiser doors/roofs (`p5_road_push_6.png`) rarely triggered full-body `VNDetectHumanRectanglesRequest`, dropping `red_reticle` rate to `12.8%` (`6/47`) during the final `~20m` roadblock grind.
+5. **Monolithic `runner.py` & Context Bloat**:
+   - [gameplayer/runner.py](gameplayer/runner.py) grew from `2,045` to `3,333` LOC (+63%), increasing edit friction and coupling unrelated subsystems (on-foot nav, combat, cover, vehicle entry, driving).
+   - `player-5` (`1,457` steps) and `toolsmith-3` (`1,750+` steps, compacting mid-task) ran too long before rotation, and full `pytest` wall-clock time grew from `~5s` to `93–206s` under live Wine CPU contention.
+6. **No Audio Perception Yet**:
+   - `ScreenCaptureKit` / `AVFoundation` Python bindings were not installed in `.venv`, leaving gunfire direction, hitmarkers, sirens, vehicle collision/stall audio, and dialogue completion strictly inferred from pixels/OCR.
+
+### D. What We Can Do Better Next Time
+
+1. **Automated Dead-Keyboard Watchdog & Rapid Escalation (Plus Virtual Gamepad Evaluation)**:
+   - Add a `verify_keyboard_liveness()` guard triggered on any `2+` consecutive zero-response movement turns: run `focus_game_window(cycle_app_focus=True)`, pulse modifiers, and probe `p`/`escape` for `pause_menu`. If still unresponsive, abort and alert the user within `<2 minutes` (or run a user-approved relaunch script that reloads the latest Story Mode autosave).
+   - Evaluate legitimate macOS virtual controller / Wine XInput support for future runs: analog left/right sticks eliminate binary WASD steering wobble, unlock GTA V's native controller lock-on/aim smoothness, and bypass `winemac.drv`'s keyboard message-loop wedge entirely.
+2. **Split `gameplayer/runner.py` (`3,333` LOC) Into Focused Submodules**:
+   - Refactor into `gameplayer/loop_engine.py` (shared tick loop, focus/banner guards, shared `StallDetector` with enforced `on_recovery_reset()` clock hygiene), `gameplayer/nav_foot.py`, `gameplayer/combat.py`, and `gameplayer/driving.py`. Keep each module `<700` LOC so engineering edits and offline reviews stay fast.
+3. **Upper-Body Vision Detection & Flow-Based Cover/Stall Sensing**:
+   - Enable `VNDetectHumanRectanglesRequest` with `upperBodyOnly = True` (Apple Vision supports upper-body mode natively) as the secondary pass behind full-body detection so cops peeking over car hoods and crates lock reliably without noisy dark-blob fallbacks.
+   - Replace `_road_motion_score` stall checks with **minimap-interior phase correlation / scroll velocity** (measuring map-tile motion inside the minimap crop, completely immune to 3D camera pans, blowing snow, and tire spin) and classify cover via **camera-offset / peek-shift verification** rather than fixed brightness columns.
+4. **Proportional PWM Driving & Wanted-Evasion Mode for Los Santos**:
+   - Upgrade `follow_gps_drive` from two-tier steer (`0.045s` pulse vs full hold) to continuous bearing-proportional PWM steering (`duty = clamp((|bearing| - deadband) / 0.35, 0.2, 1.0)`) plus a Los Santos `"lose the cops"` evasion loop (detect flashing red/blue minimap siren border + wanted stars, steer away from police cones into side streets/off-road until stars clear).
+5. **Add Audio Capture via `ScreenCaptureKit`**:
+   - Install `pyobjc-framework-ScreenCaptureKit` and feed lightweight audio energy / stereo direction / dialogue-silence features into telemetry and combat/cutscene detectors (`ScreenCaptureAccess` is already granted).
+6. **Proactive Worker Rotation & Fast/Slow Test Split**:
+   - Rotate `player` and `toolsmith` automatically around `~400–500` steps (at natural mission checkpoints) to avoid compaction stalls.
+   - Tag heavy simulator rollouts (`@pytest.mark.slow`) so routine hotfix verification runs fast unit tests in `<10s` while full simulator rollouts run in parallel or on major cycles.

@@ -4,12 +4,12 @@ Updated by `watcher` (and initialized by `toolsmith` in Phase 0).
 
 ## Current Run State
 
-- **Current Mission / Checkpoint**: *"Franklin and Lamar"* — **Blocked on Wine Keyboard Input Freeze** (`player: player-6`)
+- **Current Mission / Checkpoint**: *"Franklin and Lamar"* — **Stopped at User Request (`2026-11-21 09:25 PST`)** after **Prologue Complete (`#399`)**; halted on Wine keyboard input wedge (`#403`/`#409`/`#411`).
 - **Consecutive Failures**: `0` (`Prologue` cleared `#399`; keyboard freeze active since `12:59:52Z`)
-- **Minutes on Checkpoint**: `77` (`12:58Z–14:15Z`, `#403` / `#409` / `#411` / `#412`)
-- **LLM Turns per Checkpoint**: `N/A (blocked)`
-- **Minutes Since Last Commit**: `0` (Cycle 21 / Checkpoint 12 `cycle_app_focus` + docs)
-- **Active Issues**: Checkpoint 12 (`#410`, `#412`) Cycle 21: *"Franklin and Lamar"* blocked since `12:59:52Z` by internal Wine/`GTA5.exe` keyboard loop wedge (`#409`/`#411` proved all 4 macOS keyboard paths fail while mouse works); awaiting user physical check or game restart. Added `cycle_app_focus` support (`gameplayer/window.py`), Wine keyboard diagnostic/recovery runbook (`TOOLS.md`), and Checkpoint 12 retrospective (`LESSONS_LEARNED.md`). `capture_daemon` active.
+- **Minutes on Checkpoint**: `240` (idle awaiting physical key check / game restart before user stop)
+- **LLM Turns per Checkpoint**: `8` (`player-6`)
+- **Minutes Since Last Commit**: `0` (Final Session 2 Retrospective documented in `LESSONS_LEARNED.md`, `STATUS.md`, `README.md`)
+- **Active Issues**: All swarm workers (`player-6`, `toolsmith-3`, `verifier-3`, `watcher-3`, `monitor-3`), the 30-min cron (`task-1337`), and `capture_daemon` are stopped cleanly. Resume *"Franklin and Lamar"* after restarting/refocusing `GTA5.exe` so Wine re-initializes its keyboard queue.
 
 ## Self-Improvement Log
 
@@ -71,4 +71,5 @@ Updated by `watcher` (and initialized by `toolsmith` in Phase 0).
 | Checkpoint 10 (Cycle 18) | `11:32Z–12:04Z` Checkpoint 10 retrospective (`14` drive runs ~`540s`, `0.13–0.14mi` chopper, `#378`/`#383` resets `#387`). | `ec03937`: Append Checkpoint 10 (`2026-11-21 04:04 PST / 12:04Z`) to `LESSONS_LEARNED.md` & refresh `STATUS.md`. | `@verifier-3` PASS (`#390`, `130 passed`); merged & pushed to `main`. |
 | Checkpoint 10 (Cycle 19) | `8x high_bearing_stall` in `19s` (`#393`, `#394`) slammed SUV into bridge guardrail (`#391`) because `last_motion_check_t` wasn't reset in `_perform_stuck_recovery()` and `0.30` fired on sweeping bends. | `b1c448e`: Reset `last_motion_check_t = None` in `_perform_stuck_recovery()` and raise `high_bearing_stall` to `>= 0.58 >= 3.0s` with `abs(bearing)` improvement reset (`< prev_best - 0.08`). | `@verifier-3` PASS (`#398`, `130 passed`); **Prologue Complete (`#399`)**, merged & pushed to `main`. |
 | Checkpoint 11 (Cycle 20) | `12:04Z–12:44Z` Checkpoint 11 retrospective (Prologue Complete `#396`/`#399`, `b1c448e`, `player-5 -> player-6` `#401`, `#402`). | `2ed735e`: Append Checkpoint 11 (`2026-11-21 04:44 PST / 12:44Z`) to `LESSONS_LEARNED.md` & update `STATUS.md` (`Los Santos Credits -> Franklin and Lamar`, `player-6`). | `@verifier-3` PASS (`#406`, `130 passed`); merged & pushed to `main`. |
-| Checkpoint 12 (Cycle 21) | Wine/`GTA5.exe` keyboard wedge in *"Franklin and Lamar"* (`12:59:52Z`, `#403`/`#409`/`#411`: all 4 macOS key paths ignored while mouse still works); `12:44Z–14:15Z` Checkpoint 12 (`#410`, `#412`). | `gameplayer/window.py` (`cycle_app_focus` + `yield_app_focus`), `TOOLS.md` Wine freeze runbook, Checkpoint 12 (`2026-11-21 06:15 PST / 14:15Z`) in `LESSONS_LEARNED.md` & `STATUS.md`, mocked tests in `tests/test_window.py`. | Pending `@verifier-3` QA & user physical check/restart. |
+| Checkpoint 12 (Cycle 21) | Wine/`GTA5.exe` keyboard wedge in *"Franklin and Lamar"* (`12:59:52Z`, `#403`/`#409`/`#411`: all 4 macOS key paths ignored while mouse still works); `12:44Z–14:15Z` Checkpoint 12 (`#410`, `#412`). | `a1d305f`: `gameplayer/window.py` (`cycle_app_focus` + `yield_app_focus`), `TOOLS.md` Wine freeze runbook, Checkpoint 12 (`2026-11-21 06:15 PST / 14:15Z`) in `LESSONS_LEARNED.md` & `STATUS.md`, mocked tests in `tests/test_window.py`. | `@verifier-3` PASS (`#414`, `132 passed`); merged & pushed (`#415`). |
+| Session 2 Final Retrospective | User stopped swarm (`09:25 PST`) and requested full synthesis of what worked, what failed, and next-iteration improvements. | Appended Section 17 (`Session 2 Final Synthesis`) to `LESSONS_LEARNED.md` with Session 1 vs. Session 2 scorecard (`23.2%` overall / `56.4%` peak `red_reticle`, `11` vs `47` resets, **Prologue Complete**), updated `STATUS.md` and `README.md`. | Offline `.venv/bin/pytest -v` verified; committed & pushed to `origin/main`. |
