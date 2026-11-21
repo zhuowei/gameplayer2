@@ -1095,10 +1095,37 @@ def test_enter_nearest_vehicle_distance_gate_settle_38_and_follow_gps_drive_mild
 
 
 def test_follow_gps_drive_recovers_from_rocking_high_bearing_stall_and_target_dist_stall(tmp_path) -> None:
-    """Re #382: rocking against a car with high road_motion triggers stuck_recovery on high_bearing_stall & target_dist_stall."""
-    # 1) check_1145 scenario: high visual rocking (road_motion >> 3) + sustained sharp yellow route (+0.498 -> +0.374 -> +0.498).
-    def _rocking_sharp_frame(idx: int) -> Image.Image:
+    """Re #382/#393: moving 0.37..0.50 curves never stall; wedged >=0.58 stalls after 3.0s without <2.5s re-trigger; target_dist_stall fires."""
+    # 1a) Sweeping highway/bridge curve (+0.374 <-> +0.498 while moving) must NOT trigger high_bearing_stall!
+    def _moving_curve_frame(idx: int) -> Image.Image:
         pts = [(0.55, 0.76), (0.95, 0.78)] if (idx % 2 == 0) else [(0.55, 0.72), (0.95, 0.54)]
+        img = make_synthetic_minimap_frame(health_ratio=0.90, route_yellow_rel=pts)
+        shade = 220 if (idx % 2 == 0) else 35
+        ImageDraw.Draw(img).rectangle((300, 150, 900, 450), fill=(shade, shade, shade))
+        return img
+
+    clock_curve = FakeClock()
+    backend_curve = RecordingInputBackend()
+    log_curve = tmp_path / "moving_curve.jsonl"
+    ctrl_curve = InputController(backend_curve, TelemetryLogger(log_curve), clock=clock_curve, sleep_fn=clock_curve.sleep, register_signals=False)
+    runner_curve = ActionRunner(
+        ctrl_curve,
+        ReplayWindowBackend(_moving_curve_frame),
+        ScriptedHudOCR(lambda _i: {}),
+        TelemetryLogger(log_curve),
+        clock=clock_curve,
+        sleep_fn=clock_curve.sleep,
+    )
+    runner_curve.follow_gps_drive(
+        stuck_window_s=1.0,
+        reverse_duration_s=0.4,
+        config=LoopConfig(max_duration_s=4.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+    assert [r for r in read_telemetry(log_curve, tool="runner") if r.get("action") == "stuck_recovery"] == []
+
+    # 1b) Truly wedged >= 0.58 bearing (+0.593..+0.626) triggers high_bearing_stall >= 3.0s, and resets last_motion_check_t (no < 2.5s re-trigger!).
+    def _wedged_frame(idx: int) -> Image.Image:
+        pts = [(0.55, 0.80), (0.90, 0.95)] if (idx % 2 == 0) else [(0.55, 0.82), (0.85, 0.96)]
         img = make_synthetic_minimap_frame(health_ratio=0.90, route_yellow_rel=pts)
         shade = 220 if (idx % 2 == 0) else 35
         ImageDraw.Draw(img).rectangle((300, 150, 900, 450), fill=(shade, shade, shade))
@@ -1106,23 +1133,33 @@ def test_follow_gps_drive_recovers_from_rocking_high_bearing_stall_and_target_di
 
     clock1 = FakeClock()
     backend1 = RecordingInputBackend()
-    log1 = tmp_path / "rock_sharp.jsonl"
+    log1 = tmp_path / "wedged_sharp.jsonl"
     ctrl1 = InputController(backend1, TelemetryLogger(log1), clock=clock1, sleep_fn=clock1.sleep, register_signals=False)
     runner1 = ActionRunner(
         ctrl1,
-        ReplayWindowBackend(_rocking_sharp_frame),
+        ReplayWindowBackend(_wedged_frame),
         ScriptedHudOCR(lambda _i: {}),
         TelemetryLogger(log1),
         clock=clock1,
         sleep_fn=clock1.sleep,
     )
+    recovery_times: list[float] = []
+    orig_log = runner1._logger.log
+
+    def _capture_log(*args, **kwargs):
+        if kwargs.get("action") == "stuck_recovery":
+            recovery_times.append(clock1())
+        return orig_log(*args, **kwargs)
+
+    runner1._logger.log = _capture_log  # type: ignore[method-assign]
     runner1.follow_gps_drive(
         stuck_window_s=1.0,
-        reverse_duration_s=0.4,
-        config=LoopConfig(max_duration_s=4.0, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+        reverse_duration_s=0.8,
+        config=LoopConfig(max_duration_s=7.2, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
     )
     logs1 = read_telemetry(log1, tool="runner")
     stucks1 = [r for r in logs1 if r.get("action") == "stuck_recovery"]
+    assert len(stucks1) == 1 or (len(stucks1) >= 2 and (recovery_times[1] - recovery_times[0]) >= 3.5)
     assert len(stucks1) >= 1
     assert stucks1[0]["details"]["reason"] == "high_bearing_stall"
     # Verify forward steer-around ('w' + 'd') occurred after reverse release

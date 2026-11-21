@@ -2288,6 +2288,7 @@ class ActionRunner:
         last_motion_check_t: Optional[float] = None
         low_motion_elapsed_s = 0.0
         high_bearing_elapsed_s = 0.0
+        prev_best_abs_bearing: Optional[float] = None
         min_target_dist: Optional[float] = None
         target_stall_elapsed_s = 0.0
         sharp_brake_until_t = 0.0
@@ -2303,7 +2304,7 @@ class ActionRunner:
                 self.input.key_up(key)
 
         def _perform_stuck_recovery(reason: str = "low_motion") -> None:
-            nonlocal recovery_count, low_motion_elapsed_s, high_bearing_elapsed_s, target_stall_elapsed_s, min_target_dist, prev_gray, sharp_brake_until_t, sharp_brake_cooldown_until_t
+            nonlocal recovery_count, low_motion_elapsed_s, high_bearing_elapsed_s, prev_best_abs_bearing, target_stall_elapsed_s, min_target_dist, prev_gray, last_motion_check_t, sharp_brake_until_t, sharp_brake_cooldown_until_t
             recovery_count += 1
             primary_counter = steer_left_key if last_bearing >= 0 else steer_right_key
             alt_counter = steer_right_key if primary_counter == steer_left_key else steer_left_key
@@ -2339,14 +2340,16 @@ class ActionRunner:
                     _set_key(alt_counter, False)
             low_motion_elapsed_s = 0.0
             high_bearing_elapsed_s = 0.0
+            prev_best_abs_bearing = None
             target_stall_elapsed_s = 0.0
             min_target_dist = None
             prev_gray = None
+            last_motion_check_t = None
             sharp_brake_until_t = 0.0
             sharp_brake_cooldown_until_t = 0.0
 
         def _on_tick(state: FrameState) -> Optional[str]:
-            nonlocal prev_gray, last_motion_check_t, low_motion_elapsed_s, high_bearing_elapsed_s, min_target_dist, target_stall_elapsed_s, sharp_brake_until_t, sharp_brake_cooldown_until_t, last_bearing
+            nonlocal prev_gray, last_motion_check_t, low_motion_elapsed_s, high_bearing_elapsed_s, prev_best_abs_bearing, min_target_dist, target_stall_elapsed_s, sharp_brake_until_t, sharp_brake_cooldown_until_t, last_bearing
             mm = state.minimap
             targets = mm.targets.get(route_color, ())
             target = targets[0] if targets else mm.primary_objective
@@ -2377,10 +2380,19 @@ class ActionRunner:
                 prev_gray = cur_gray
                 last_motion_check_t = state.elapsed_s
 
-                if bearing is not None and abs(bearing) >= 0.30:
-                    high_bearing_elapsed_s += dt
-                elif bearing is None or abs(bearing) < 0.22:
+                if bearing is not None and abs(bearing) >= 0.58:
+                    abs_b = abs(bearing)
+                    if prev_best_abs_bearing is None:
+                        prev_best_abs_bearing = abs_b
+                        high_bearing_elapsed_s += dt
+                    elif abs_b < prev_best_abs_bearing - 0.08:
+                        prev_best_abs_bearing = abs_b
+                        high_bearing_elapsed_s = 0.0
+                    else:
+                        high_bearing_elapsed_s += dt
+                else:
                     high_bearing_elapsed_s = 0.0
+                    prev_best_abs_bearing = None
 
                 if len(targets) == 1 and target is not None and target.distance > max(arrive_distance * 2.0, 0.18):
                     if min_target_dist is None or target.distance < (min_target_dist - 0.015):
@@ -2395,7 +2407,7 @@ class ActionRunner:
                 stall_reason: Optional[str] = None
                 if low_motion_elapsed_s >= stuck_window_s:
                     stall_reason = "low_motion"
-                elif high_bearing_elapsed_s >= max(stuck_window_s * 1.8, 2.5):
+                elif high_bearing_elapsed_s >= max(stuck_window_s * 2.0, 3.0):
                     stall_reason = "high_bearing_stall"
                 elif target_stall_elapsed_s >= max(stuck_window_s * 4.5, 4.0):
                     stall_reason = "target_dist_stall"
@@ -2407,6 +2419,7 @@ class ActionRunner:
             else:
                 low_motion_elapsed_s = 0.0
                 high_bearing_elapsed_s = 0.0
+                prev_best_abs_bearing = None
                 target_stall_elapsed_s = 0.0
                 min_target_dist = None
                 prev_gray = None
