@@ -4,12 +4,12 @@ Updated by `watcher` (and initialized by `toolsmith` in Phase 0).
 
 ## Current Run State
 
-- **Current Mission / Checkpoint**: Prologue — Getaway SUV Drive (`0.58mi`, Cycle 19 hotfix `#393` re `12:08Z` `8x high_bearing_stall`)
-- **Consecutive Failures**: `2` (`#388` car destroyed on bridge, `#391` Michael died at `0.32mi`)
-- **Minutes on Checkpoint**: `42` (`#376` boarded getaway SUV at `03:31 PST`)
-- **LLM Turns per Checkpoint**: `4`
-- **Minutes Since Last Commit**: `0` (Cycle 19 hotfix)
-- **Active Issues**: Cycle 19 (`#393`): reset `last_motion_check_t = None` inside `_perform_stuck_recovery()`, raised `high_bearing_stall` threshold to `>= 0.58` for `>= 3.0s` with `abs(bearing)` improvement reset (`< prev_best - 0.08`) so normal sweeping `0.30..0.55` highway curves never fire mid-corner reverse. `capture_daemon` active.
+- **Current Mission / Checkpoint**: Los Santos Credits -> *"Franklin and Lamar"* (Prologue Complete `#399`, `player: player-6`)
+- **Consecutive Failures**: `0` (`Prologue` cleared `#399`, `b1c448e` live)
+- **Minutes on Checkpoint**: `5` (`#401` `player-6` rotated in for Los Santos at `04:43 PST`)
+- **LLM Turns per Checkpoint**: `1`
+- **Minutes Since Last Commit**: `0` (Cycle 20 / Checkpoint 11 docs)
+- **Active Issues**: Checkpoint 11 (`#402`) Cycle 20: appended `12:04Z–12:44Z` retrospective (`Prologue Complete`, `b1c448e`, `player-5 -> player-6`) in `LESSONS_LEARNED.md` & `STATUS.md`. Standby for *"Franklin and Lamar"* driving/pursuit. `capture_daemon` active.
 
 ## Self-Improvement Log
 
@@ -69,4 +69,5 @@ Updated by `watcher` (and initialized by `toolsmith` in Phase 0).
 | Checkpoint 9 (Cycle 16) | `enter_nearest_vehicle` false-confirmed at `pre_dist=0.373` (`shift_score >= 12`) and missed `pre_dist=0.058` under `settle_s=2.5`, plus binary driving steer risk (`#377`). | `b92fb64`: Gate `shift_score` (`<= max(arrive_distance * 2.5, 0.16)`) & `cur_has_drive` (`<= 0.14`) in `enter_nearest_vehicle(settle_s=3.8)`, add smooth `0.045s` mild-curve steer pulsing (`0.08..0.24`) in `follow_gps_drive()`, & append Checkpoint 9 retrospective. | `@verifier-3` PASS (`#380`, `129 passed`); merged & pushed to `main`. |
 | Checkpoint 9 (Cycle 17) | Getaway SUV pinned against white civilian car at `0.13mi` (`clips/check_1145.mp4`, `#382`) logged `0` `stuck_recovery`s because `not sharp` disabled stuck checks, continuous `'s'` rocked car (`road_motion >= 20`), & unstick lacked forward steer-around. | `3cd2628`: Replace continuous `'s'` on `sharp` with `0.25s` brake pulse (`1.6s` cooldown), keep stuck detection active during `sharp`, trigger `stuck_recovery` on `high_bearing_stall` (`|bearing| >= 0.30`) & `target_dist_stall` (`>= 4.0s`), and steer forward around obstacle after reverse. | `@verifier-3` PASS (`#385`, `130 passed`); merged & pushed to `main`. |
 | Checkpoint 10 (Cycle 18) | `11:32Z–12:04Z` Checkpoint 10 retrospective (`14` drive runs ~`540s`, `0.13–0.14mi` chopper, `#378`/`#383` resets `#387`). | `ec03937`: Append Checkpoint 10 (`2026-11-21 04:04 PST / 12:04Z`) to `LESSONS_LEARNED.md` & refresh `STATUS.md`. | `@verifier-3` PASS (`#390`, `130 passed`); merged & pushed to `main`. |
-| Checkpoint 10 (Cycle 19) | `8x high_bearing_stall` in `19s` (`#393`, `#394`) slammed SUV into bridge guardrail (`#391`) because `last_motion_check_t` wasn't reset in `_perform_stuck_recovery()` and `0.30` fired on sweeping bends. | Cycle 19: Reset `last_motion_check_t = None` in `_perform_stuck_recovery()` and raise `high_bearing_stall` to `>= 0.58 >= 3.0s` with `abs(bearing)` improvement reset (`< prev_best - 0.08`). | Pending `@verifier-3` QA. |
+| Checkpoint 10 (Cycle 19) | `8x high_bearing_stall` in `19s` (`#393`, `#394`) slammed SUV into bridge guardrail (`#391`) because `last_motion_check_t` wasn't reset in `_perform_stuck_recovery()` and `0.30` fired on sweeping bends. | `b1c448e`: Reset `last_motion_check_t = None` in `_perform_stuck_recovery()` and raise `high_bearing_stall` to `>= 0.58 >= 3.0s` with `abs(bearing)` improvement reset (`< prev_best - 0.08`). | `@verifier-3` PASS (`#398`, `130 passed`); **Prologue Complete (`#399`)**, merged & pushed to `main`. |
+| Checkpoint 11 (Cycle 20) | `12:04Z–12:44Z` Checkpoint 11 retrospective (Prologue Complete `#396`/`#399`, `b1c448e`, `player-5 -> player-6` `#401`, `#402`). | Append Checkpoint 11 (`2026-11-21 04:44 PST / 12:44Z`) to `LESSONS_LEARNED.md` & update `STATUS.md` (`Los Santos Credits -> Franklin and Lamar`, `player-6`). | Pending `@verifier-3` QA. |

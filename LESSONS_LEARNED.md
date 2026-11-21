@@ -205,3 +205,14 @@ Escalating deep perception and control failures to `Carbon` specialists produced
 - **What did not work (`#378`, `#382`, `#383`, `#387`)**:
   - Two driving `MISSION_FAILED` resets (`11:37:39` `"The car was stuck in the snow."` at `0.14mi` `#378`, `11:54:35` `"The route was abandoned."` `#383`) plus an `18m` getaway-drive grind before `3cd2628` merged (`04:03:31`), because wheelspin/rocking against roadside snowbanks & civilian cars kept `_road_motion_score >= 3.0`, `not sharp` disabled `stuck_recovery` whenever `|bearing| >= 0.45`, and continuous `'s'` during sharp turns caused reverse-rocking.
 - **Cycle 17 Fixes (Verified `3cd2628`, `#385`)**: Replaced continuous `'s'` during `sharp` turns with a `0.25s` brake pulse (`1.6s` cooldown), kept `enable_stuck_recovery` active across `sharp` turns, triggered `stuck_recovery` on sustained `high_bearing_stall` (`|bearing| >= 0.30 >= 2.5s`) and `target_dist_stall` (`>= 4.0s`), and committed a `<= 0.45s` forward steer-around pulse after reverse.
+
+---
+
+## 15. Checkpoint 11 (2026-11-21 04:44 PST / 12:44Z)
+
+- **What went right (`3cd2628`, `b1c448e`, `#396`, `#399`, `#401`, `#402`)**:
+  - **PROLOGUE COMPLETE (`#396`, `#399`)**: Completed the North Yankton getaway drive (`3cd2628`, `12:21:49Z`), cleared the train-crash ambush, and rolled into the Los Santos opening credits (`captures/p5_ambush_check2.png`, Vespucci Beach -> *"Franklin and Lamar"*).
+  - **Cycle 19 Hotfix (`b1c448e`, `130 passed`)**: Fixed `follow_gps_drive` `_perform_stuck_recovery` missing `last_motion_check_t = None` (eliminating the `8x`-in-`19s` rapid reverse loop from `12:08:06–12:08:25Z`) and raised `high_bearing_stall` threshold (`>= 0.58 >= 3.0s` + improvement reset `< prev_best - 0.08`) ahead of Los Santos driving.
+  - **Clean Worker Rotation (`#401`)**: Rotated 1,457-step `player-5` cleanly to fresh `player-6` for Los Santos Story Mode.
+- **What did not work (`#388`, `#391`, `#395`, `#402`)**:
+  - Three driving `MISSION_FAILED` resets (`12:05:33`, `12:09:58` bridge guardrail `#391`, `12:17:10` final `0.12mi` turnoff `#395`) occurred on `3cd2628` before `b1c448e` merged (`04:36:04`), caused by the unreset `last_motion_check_t` `1.3s` recovery-sleep `dt` inflation and `0.30` sweeping-curve trigger.
