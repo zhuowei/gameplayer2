@@ -752,6 +752,8 @@ class ActionRunner:
         last_bearing: float,
         duration_s: float,
         vault: bool,
+        steer_dx: int = 0,
+        back_up_s: float = 0.0,
     ) -> None:
         # After 2 failed attempts in bearing direction, alternate left/right instead of grinding one obstacle side.
         if attempt < 3 and last_bearing < -0.05:
@@ -769,6 +771,8 @@ class ActionRunner:
                 "sidestep_key": sidestep_key,
                 "duration_s": duration_s,
                 "vault": vault,
+                "steer_dx": steer_dx,
+                "back_up_s": back_up_s,
             },
         )
         # Release held forward movement ("w"/"lshift") during sidestep so Trevor doesn't keep pressing into the obstacle.
@@ -776,12 +780,15 @@ class ActionRunner:
         for k in held_forward:
             self.input.key_up(k)
         try:
-            if attempt >= 2:
+            eff_back_s = back_up_s if back_up_s > 0.0 else (min(0.2, duration_s * 0.5) if attempt >= 2 else 0.0)
+            if eff_back_s > 0.0:
                 self.input.key_down("s")
                 try:
-                    self._sleep_chunked(min(0.2, duration_s * 0.5))
+                    self._sleep_chunked(eff_back_s)
                 finally:
                     self.input.key_up("s")
+            if steer_dx != 0:
+                self._steer_camera(steer_dx, 0)
             self.input.key_down(sidestep_key)
             try:
                 if vault:
@@ -902,10 +909,27 @@ class ActionRunner:
 
                 if low_motion_elapsed_s >= stuck_window_s and (cfg.max_duration_s - state.elapsed_s) > 0.25:
                     recovery_count += 1
-                    allow_vault = vault_on_stuck and (mm.nearest_enemy is None) and (
-                        not mm.minimap_visible or mm.health_ratio >= 0.65
+                    off_axis = abs(last_bearing) > 0.35
+                    allow_vault = (
+                        vault_on_stuck
+                        and (not off_axis)
+                        and (mm.nearest_enemy is None)
+                        and (not mm.minimap_visible or mm.health_ratio >= 0.65)
                     )
-                    self._perform_on_foot_sidestep(recovery_count, last_bearing, unstuck_duration_s, allow_vault)
+                    steer_dx = (
+                        int(round(max(-320.0, min(320.0, last_bearing * max(steer_gain * 1.5, 240.0)))))
+                        if off_axis
+                        else 0
+                    )
+                    back_up_s = 0.25 if off_axis else 0.0
+                    self._perform_on_foot_sidestep(
+                        recovery_count,
+                        last_bearing,
+                        unstuck_duration_s,
+                        allow_vault,
+                        steer_dx=steer_dx,
+                        back_up_s=back_up_s,
+                    )
                     low_motion_elapsed_s = 0.0
                     prev_gray = None
                     last_motion_check_t = None

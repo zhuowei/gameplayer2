@@ -91,3 +91,14 @@ Escalating deep perception and control failures to `Carbon` specialists produced
    - Classify crouch-cover vs. standing vs. behind-vehicle posture directly from pixels so `enter_cover()` / `exit_cover()` are idempotent, and promote repeatable mission sequences out of ad-hoc inline `player` scripts into versioned, simulator-tested playbooks in [gameplayer/](gameplayer/).
 4. **Decouple Live Telemetry/Scoreboard From Git-Tracked Files**:
    - Keep `STATUS.md` updates committed or write machine-updated scoreboard snapshots to `logs/status.json` (`.gitignore`d) so `toolsmith` worktree merges never collide with `watcher` monitoring updates.
+
+---
+
+## 5. Checkpoint 1 (2026-11-20 23:32 PST)
+
+- **Progression & Perception (`410ee3f`, `f87c9a2`, Cycle 3)**:
+  - Preserving native `0x20000000` `CGEventGetFlags` bits + `kCGEventFlagMaskNumericPad | kCGEventFlagMaskSecondaryFn` on arrow/fn keys (`gameplayer/input.py`) and activating via `click("left")` instead of `right` (which aims/cancels the phone) unblocked the Prologue bank vault phone detonation prompt (`player-4` reached Vault / Hallway Escort).
+  - Offline `gameplayer.replay_bench` across saved failure clips (`clips/yard_zero_red_1411.mp4`, `clips/yard_flank_stall_1551.mp4`, `clips/yard_low_red_1502.mp4`) verified `VisionHumanDetectorBackend` runs in `~11.5–23.3 ms/frame` post-warmup and locks **`57%–60%` (`17–18/30`, `6/10`)** of frames onto visible enemies where blind `red_reticle` had `0%`.
+  - **Cycle 1 (`410ee3f`)**: Fixed `advance_flank_unblock` post-sleep timing (`_elapsed_now()`), added advancing-clock 2.5D simulator (`tests/sim_harness.py` with `0.75 px/rd` recoil, `1:2.8` ADS/hipfire sensitivity, `0.48` health regen cap, and box occluders), `Vision` + silhouette visual target steering, and FFT phase-correlation `CameraMotionTracker`.
+  - **Cycle 2 (`f87c9a2`)**: Added `classify_posture` + idempotent `enter_cover()`/`exit_cover(min_health=0.42)`, `<=5s` `calibrate_controls()`, `gameplayer/replay_bench.py`, simulator-tested `gameplayer/playbooks.py`, and gitignored `logs/status.json` (`gameplayer/status_store.py`).
+  - **Cycle 3**: Fixed `follow_route_on_foot` indoor wall-grinding (`abs(last_bearing) > 0.35` now releases `w`/`lshift`, backs off `"s"` `0.25s`, skips off-axis wall-vaulting, and steers aggressively toward `last_bearing`).

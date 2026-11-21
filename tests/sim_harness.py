@@ -296,6 +296,17 @@ class KinematicWorld:
         # Sky & snow ground
         draw.rectangle((0, 0, w, max(0, min(h, horizon_y))), fill=(95, 112, 134))
         draw.rectangle((0, max(0, min(h, horizon_y)), w, h), fill=(195, 206, 218))
+        # World-anchored snow tracks in [10..34m] so walking forward produces real road motion inside y=[0.15..0.72]
+        rad = math.radians(self.yaw_deg)
+        along = self.player_x * math.sin(rad) + self.player_y * math.cos(rad)
+        phase = along % 4.0
+        for band_i in range(6):
+            dist_m = 10.0 + band_i * 4.0 + (4.0 - phase)
+            gy = int(round(horizon_y + (math.degrees(math.atan2(self.eye_z, dist_m)) / self.fov_v_deg) * h))
+            if horizon_y + 2 < gy < h - 10:
+                half_span = max(60, int(round(w * 0.42)))
+                band_h = max(4, int(round(120.0 / dist_m)))
+                draw.rectangle((w // 2 - half_span, gy - band_h, w // 2 + half_span, gy + band_h), fill=(120, 134, 150))
 
         # Background skyline posts shifting smoothly with yaw/pitch for optical-flow tracking.
         for wx in range(-180, 195, 13):

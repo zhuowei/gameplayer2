@@ -161,3 +161,35 @@ def test_optical_flow_compensates_upward_recoil_and_ads_hipfire_sensitivity_stay
     assert abs(world.pitch_deg) <= 8.0
     assert world.held_keys == set()
     assert world.held_buttons == set()
+
+
+def test_follow_route_on_foot_wall_corner_unstick_backs_up_turns_without_vault(tmp_path) -> None:
+    """Cycle 3 (#283): when stuck facing a wall with |bearing| > 0.35, back up 's' and turn without wall-vaulting."""
+    world = KinematicWorld(
+        player_x=0.0,
+        player_y=0.42,
+        yaw_deg=0.0,
+        health=0.95,
+        occluders=[BoxOccluder(x0=-4.0, y0=0.8, x1=4.0, y1=1.4)],
+        yellow_target=(-1.5, -5.0),  # Behind-left (bearing ~ -0.91 -> still |bearing| > 0.35 at stuck trigger)
+    )
+    runner, _clock, input_backend, log_path = _make_sim_runner(world, tmp_path, "wall_unstick", initial_time=600.0)
+    res = runner.follow_route_on_foot(
+        stuck_window_s=0.4,
+        unstuck_duration_s=0.25,
+        config=LoopConfig(max_duration_s=4.5, hz=10.0, hud_check_interval_s=0.0, health_drop_threshold=None),
+    )
+
+    logs = read_telemetry(log_path, tool="runner")
+    recs = [r for r in logs if r.get("action") == "on_foot_stuck_recovery"]
+    assert len(recs) >= 1
+    assert recs[0]["details"]["vault"] is False
+    assert recs[0]["details"]["back_up_s"] == 0.25
+    assert recs[0]["details"]["steer_dx"] < 0
+    assert ("key_down", "space") not in input_backend.events
+    assert ("key_down", "s") in input_backend.events
+    # Player turned around from yaw=0 and moved away from the wall toward (-1.5, -5.0)
+    assert world.yaw_deg < -100.0
+    assert world.player_y < 0.0 or res.stop_reason == "target_reached"
+    assert world.held_keys == set()
+    assert world.held_buttons == set()
