@@ -862,7 +862,7 @@ class ActionRunner:
         deadband: float = 0.05,
         stop_on_subtitle_keywords: Sequence[str] = ("return to", "wait for", "stay with", "follow"),
         enable_stuck_recovery: bool = True,
-        stuck_window_s: float = 1.5,
+        stuck_window_s: float = 0.9,
         stuck_motion_threshold: float = 2.5,
         unstuck_duration_s: float = 0.55,
         vault_on_stuck: bool = True,
@@ -916,12 +916,13 @@ class ActionRunner:
                         and (mm.nearest_enemy is None)
                         and (not mm.minimap_visible or mm.health_ratio >= 0.65)
                     )
+                    indoor_wall = target_color == "yellow" and mm.yellow_route_bearing is None
                     steer_dx = (
                         int(round(max(-320.0, min(320.0, last_bearing * max(steer_gain * 1.5, 240.0)))))
                         if off_axis
                         else 0
                     )
-                    back_up_s = 0.25 if off_axis else 0.0
+                    back_up_s = 0.25 if (off_axis or indoor_wall) else 0.0
                     self._perform_on_foot_sidestep(
                         recovery_count,
                         last_bearing,
